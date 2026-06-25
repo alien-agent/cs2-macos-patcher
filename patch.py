@@ -109,13 +109,15 @@ def ensure_dotnet():
         ))
         sys.exit(1)
 
-    print(cyan("  Installing dotnet-sdk via Homebrew (this may take a minute)..."))
+    # Pin to .NET 9: the patcher targets net9.0, and the unversioned `dotnet-sdk`
+    # cask now installs .NET 10, whose runtime won't run a net9.0 app by default.
+    print(cyan("  Installing dotnet-sdk@9 via Homebrew (this may take a minute)..."))
     result = subprocess.run(
-        [brew, "install", "--cask", "dotnet-sdk"],
+        [brew, "install", "--cask", "dotnet-sdk@9"],
         capture_output=False
     )
     if result.returncode != 0:
-        print(red("  Homebrew install failed. Try manually: brew install --cask dotnet-sdk"))
+        print(red("  Homebrew install failed. Try manually: brew install --cask dotnet-sdk@9"))
         sys.exit(1)
 
     # Try again after install

@@ -4,6 +4,11 @@ Fixes crashes and enables Paradox Mods for **Cities: Skylines 2** running under 
 
 Tested: **CrossOver 26 · Game v1.5.8f1 · Apple Silicon (M3 Pro)**
 
+> **Elevated networks snapping to the ground?** That's a *separate* Apple Silicon bug (Rosetta
+> miscompiles Unity's Burst SIMD code and drops the height value), so raised roads, bridges and pipes
+> wrongly snap down onto whatever is below them. Fix it with
+> **[icetear/cs2-net-snap-fix](https://github.com/icetear/cs2-net-snap-fix)** — re-apply after each game update.
+
 ---
 
 ## How to use
@@ -23,6 +28,9 @@ The script will:
 
 > **No dotnet?** No problem — the patcher installs it for you. You only
 > need [Homebrew](https://brew.sh).
+>
+> If you already have **.NET 10** but the patcher complains the `9.0.0` runtime is missing, install
+> the matching SDK: `brew install --cask dotnet-sdk@9`.
 
 ### After a game update
 
