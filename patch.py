@@ -304,13 +304,24 @@ def main():
     else:
         print(yellow("Completed with warnings — check the output above.\n"))
 
-    print("To restore original DLLs:")
+    # List backup files for the user. Each patch run creates a new timestamped
+    # backup (`.bak.YYYYMMDD-HHMMSS`) so re-runs never overwrite history. The
+    # first run also creates a plain `.bak` that points at the most recent
+    # pre-patch snapshot.
+    print()
+    print("Backups are at:")
     print(f'  cd "{managed_dir}"')
-    for dll in ["Colossal.IO.dll", "Colossal.IO.AssetDatabase.dll"] + \
+    print("  ls *.bak*    # shows plain `.bak` plus timestamped `.bak.YYYYMMDD-HHMMSS` files")
+    print()
+    print("To restore from the most-recent pre-patch backup:")
+    for dll in ["Colossal.IO.dll", "Colossal.IO.AssetDatabase.dll", "Colossal.PSI.Common.dll", "Game.dll"] + \
                (["PDX.SDK.dll"] if full_patch else []):
         bak = os.path.join(managed_dir, dll + ".bak")
         if os.path.isfile(bak):
             print(f'  cp "{dll}.bak" "{dll}"')
+    print()
+    print("To restore a specific older backup:")
+    print('  cp "Colossal.IO.dll.bak.20260626-122500" "Colossal.IO.dll"')
 
     print()
 

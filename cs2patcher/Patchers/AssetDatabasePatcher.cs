@@ -21,8 +21,7 @@ static class AssetDatabasePatcher
         if (!File.Exists(dllPath))
             return PatchSummary.Skipped("Colossal.IO.AssetDatabase.dll not found");
 
-        var resolver = new DefaultAssemblyResolver();
-        resolver.AddSearchDirectory(managedDir);
+        var resolver = new FallbackAssemblyResolver(managedDir);
         var module = ModuleDefinition.ReadModule(dllPath, new ReaderParameters
         {
             ReadingMode = ReadingMode.Immediate,
@@ -88,13 +87,6 @@ static class AssetDatabasePatcher
         return new PatchSummary("Colossal.IO.AssetDatabase.dll", applied, DryRun: true);
     }
 
-    static void BackupAndWrite(ModuleDefinition module, string dllPath)
-    {
-        var backup = dllPath + ".bak";
-        if (!File.Exists(backup)) File.Copy(dllPath, backup);
-        var tmp = dllPath + ".tmp";
-        module.Write(tmp);
-        module.Dispose();
-        File.Move(tmp, dllPath, overwrite: true);
-    }
+    static void BackupAndWrite(ModuleDefinition module, string dllPath) =>
+        TimestampedBackup.BackupAndWrite(module, dllPath);
 }

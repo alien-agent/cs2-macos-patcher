@@ -65,6 +65,39 @@ Then re-run the patcher.
 
 ---
 
+## Required CrossOver registry edit (v1.6.0+)
+
+After the first launch on game v1.6.0 or later, you **must** enable Wine's virtual desktop
+so the game renders at a real resolution instead of 1×1 pixel. Without this fix, the game
+loads and you hear the music, but the UI renders as a tiny gray box in the corner of the
+window and HDRP throws `RenderTexture.Create failed: width & height must be larger than 0`.
+
+Edit your bottle's `user.reg`:
+
+```bash
+open -e ~/Library/Application\ Support/CrossOver/Bottles/Cities\ Skylines\ II/user.reg
+```
+
+Add this section anywhere in the file:
+
+```ini
+[Software\\Wine\\Explorer]
+"Desktop"="1920x1080"
+```
+
+Use whichever resolution matches your Mac's native display (e.g. `2560x1600` for a 13" MacBook,
+`1920x1080` for an external 1080p monitor, `3840x2160` for 4K). On Retina/HiDPI, half the native
+resolution is usually best — start with `1920x1080` and increase if it looks blurry.
+
+> **Why:** CrossOver's D3DMetal backend reports the display as 1×1 because the game window
+> isn't fully created when Direct3D queries the display mode. Wine's virtual desktop forces a
+> fixed display size *before* the game starts, so D3DMetal returns the right value.
+>
+> Setting Unity's `Screenmanager Resolution Width_h.../Height_h...` registry entries alone
+> does not work — the game overwrites them on every launch from the 1×1 display detection.
+
+---
+
 ## CrossOver settings for best performance
 
 My personal recommendation for best graphic/performance on Crossover 26:

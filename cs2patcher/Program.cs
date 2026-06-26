@@ -1,16 +1,5 @@
 // cs2patcher — IL patcher for Cities: Skylines 2 (macOS/Wine)
 // Called by patch.py; not intended for direct use.
-//
-// Usage:
-//   cs2patcher <managed-dir> lightweight [--apply]
-//   cs2patcher <managed-dir> full        [--apply]
-//
-// Output: one line per DLL in format "STATUS:DLL:detail"
-//   OK:Colossal.IO.dll:2 fixes applied
-//   SKIP:PDX.SDK.dll:already patched
-//   WARN:PDX.SDK.dll:DiskIODefaultWindows not found
-//
-// Exit code: 0 = success or already patched, 1 = argument error
 
 using Cs2MacPatcher;
 
@@ -32,19 +21,22 @@ bool apply = args.Contains("--apply");
 
 void Print(PatchSummary r)
 {
-    if (r.IsSkipped)
-        Console.WriteLine($"WARN:{r.DllName}:{r.SkipReason}");
-    else if (r.AlreadyOk)
-        Console.WriteLine($"SKIP:{r.DllName}:already patched or pattern not found");
-    else if (r.DryRun)
-        Console.WriteLine($"DRY:{r.DllName}:{r.FixesApplied} fixes would be applied");
-    else
-        Console.WriteLine($"OK:{r.DllName}:{r.FixesApplied} fixes applied");
+    if (r.IsSkipped) Console.WriteLine($"WARN:{r.DllName}:{r.SkipReason}");
+    else if (r.AlreadyOk) Console.WriteLine($"SKIP:{r.DllName}:already patched");
+    else if (r.DryRun) Console.WriteLine($"DRY:{r.DllName}:{r.FixesApplied} fixes would be applied");
+    else Console.WriteLine($"OK:{r.DllName}:{r.FixesApplied} fixes applied");
 }
 
-Print(ColossalIoPatcher.Patch(managedDir, dryRun: !apply));
-Print(AssetDatabasePatcher.Patch(managedDir, dryRun: !apply));
-if (fullMode)
-    Print(PdxSdkPatcher.Patch(managedDir, dryRun: !apply));
+// === Lightweight (always applied) ===
+Print(InjectDlcCachePatcher.Patch(managedDir, dryRun: !apply));          // Fix 18: DLC cache (Colossal.PSI.Common)
+Print(PlatformManagerIsDlcOwnedPatcher.Patch(managedDir, dryRun: !apply)); // Fix 19: auto-own DLCs (Colossal.PSI.Common)
+Print(SteamworksDlcMapperMapPatcher.Patch(managedDir, dryRun: !apply));    // Fix 20: Map set_Item (Colossal.PSI.Steamworks)
+Print(ColossalIoPatcher.Patch(managedDir, dryRun: !apply));               // Fix 21: LongDirectory IOException (Colossal.IO)
+Print(LongFileOpenWineFallbackPatcher.Patch(managedDir, dryRun: !apply));  // Fix 22: LongFile \\?\ Wine fix (Colossal.IO)
+Print(AssetDatabasePatcher.Patch(managedDir, dryRun: !apply));            // Fix 23: .priority File.Exists NOP (Colossal.IO.AssetDatabase)
+Print(RiderPathLocatorPatcher.Patch(managedDir, dryRun: !apply));         // Fix 24: Rider settings.json (Game)
+
+// === Full (Paradox Mods) ===
+if (fullMode) Print(PdxSdkPatcher.Patch(managedDir, dryRun: !apply));
 
 return 0;

@@ -21,7 +21,11 @@ static class ColossalIoPatcher
             return PatchSummary.Skipped("Colossal.IO.dll not found");
 
         var module = ModuleDefinition.ReadModule(dllPath,
-            new ReaderParameters { ReadingMode = ReadingMode.Immediate });
+            new ReaderParameters
+            {
+                ReadingMode = ReadingMode.Immediate,
+                AssemblyResolver = new FallbackAssemblyResolver(Path.GetDirectoryName(dllPath)!)
+            });
 
         var longDirType = module.Types.FirstOrDefault(t => t.Name == "LongDirectory");
         if (longDirType == null)
@@ -79,13 +83,6 @@ static class ColossalIoPatcher
         return new PatchSummary("Colossal.IO.dll", applied, DryRun: true);
     }
 
-    static void BackupAndWrite(ModuleDefinition module, string dllPath)
-    {
-        var backup = dllPath + ".bak";
-        if (!File.Exists(backup)) File.Copy(dllPath, backup);
-        var tmp = dllPath + ".tmp";
-        module.Write(tmp);
-        module.Dispose();
-        File.Move(tmp, dllPath, overwrite: true);
-    }
+    static void BackupAndWrite(ModuleDefinition module, string dllPath) =>
+        TimestampedBackup.BackupAndWrite(module, dllPath);
 }

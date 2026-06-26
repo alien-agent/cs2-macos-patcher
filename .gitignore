@@ -3,3 +3,4 @@ obj/
 *.user
 .DS_Store
 .idea
+__pycache__/

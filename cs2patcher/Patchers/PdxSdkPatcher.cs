@@ -36,7 +36,11 @@ static class PdxSdkPatcher
             return PatchSummary.Skipped("PDX.SDK.dll not found");
 
         var module = ModuleDefinition.ReadModule(dllPath,
-            new ReaderParameters { ReadingMode = ReadingMode.Immediate });
+            new ReaderParameters
+            {
+                ReadingMode = ReadingMode.Immediate,
+                AssemblyResolver = new FallbackAssemblyResolver(Path.GetDirectoryName(dllPath)!)
+            });
 
         var diskIO = module.Types.FirstOrDefault(t => t.Name == "DiskIODefaultWindows");
         if (diskIO == null)
@@ -565,13 +569,6 @@ static class PdxSdkPatcher
         }
     }
 
-    static void BackupAndWrite(ModuleDefinition module, string dllPath)
-    {
-        var backup = dllPath + ".bak";
-        if (!File.Exists(backup)) File.Copy(dllPath, backup);
-        var tmp = dllPath + ".tmp";
-        module.Write(tmp);
-        module.Dispose();
-        File.Move(tmp, dllPath, overwrite: true);
-    }
+    static void BackupAndWrite(ModuleDefinition module, string dllPath) =>
+        TimestampedBackup.BackupAndWrite(module, dllPath);
 }
