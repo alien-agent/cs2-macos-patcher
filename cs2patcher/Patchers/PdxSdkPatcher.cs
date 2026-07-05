@@ -11,8 +11,10 @@
 // FIX 14:   FileAlreadyDownloaded — always return false (prevents lock-acquire on missing file)
 // FIX 15:   GetLockToken — remove Win32 timer-based 10s timeout (fires in milliseconds under Wine)
 // FIX 16:   CreateFileStream MoveNext — dispose reader lock in IOException catch (prevents deadlock)
-// FIX 17:   ListFiles/ListDirectories/ListFilesRecursive — wrap body in try-catch(IOException)
-//           returning empty list (Wine throws IOException: Success for non-existent directories)
+// FIX 17:   ListFiles/ListDirectories — wrap body in try-catch(IOException) returning empty
+//           list (Wine throws IOException: Success for non-existent directories). NOTE:
+//           ListFilesRecursive is deliberately NOT patched — on v1.6.0f1 its empty return
+//           hangs the init-time mod scan (see docs/technical.md FIX 17).
 //
 // FIX 15, 16, 17 are the root-cause fixes discovered on v1.5.8f1+ where FIX 7/9/14 alone
 // were insufficient. FIX 14 is kept as a safety net for older versions.
@@ -22,6 +24,7 @@
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 
@@ -29,6 +32,22 @@ namespace Cs2MacPatcher;
 
 static class PdxSdkPatcher
 {
+    // Debug/bisection switch: set env CS2_PDX_SKIP="7,12,17" to skip those FIX numbers.
+    // Used to isolate which PDX.SDK fix breaks on a given game version.
+    static readonly HashSet<int> _skip = ParseSkip();
+
+    static HashSet<int> ParseSkip()
+    {
+        var set = new HashSet<int>();
+        var raw = Environment.GetEnvironmentVariable("CS2_PDX_SKIP");
+        if (!string.IsNullOrWhiteSpace(raw))
+            foreach (var part in raw.Split(','))
+                if (int.TryParse(part.Trim(), out var n)) set.Add(n);
+        return set;
+    }
+
+    static bool SkipFix(int n) => _skip.Contains(n);
+
     public static PatchSummary Patch(string managedDir, bool dryRun)
     {
         var dllPath = Path.Combine(managedDir, "PDX.SDK.dll");
@@ -52,7 +71,7 @@ static class PdxSdkPatcher
 
         // ---- FIX 1: NOP IOException throws after P/Invoke calls in long-path methods ----
         string[] fix1Targets = { "DeleteLongPathFile", "DeleteLongPathDirectory", "CreateLongPathDirectory", "LongPathMove" };
-        foreach (var methodName in fix1Targets)
+        if (!SkipFix(1)) foreach (var methodName in fix1Targets)
         {
             var method = diskIO.Methods.FirstOrDefault(m => m.Name == methodName);
             if (method?.HasBody != true) continue;
@@ -75,7 +94,7 @@ static class PdxSdkPatcher
             ("CreateDirectory", "System.IO.Directory", "CreateDirectory"),
             ("Move",            "System.IO.Directory", "Move"),
         };
-        foreach (var (methodName, typeName, callName) in fix2Targets)
+        if (!SkipFix(2)) foreach (var (methodName, typeName, callName) in fix2Targets)
         {
             var method = diskIO.Methods.FirstOrDefault(m => m.Name == methodName);
             if (method?.HasBody != true) continue;
@@ -89,6 +108,8 @@ static class PdxSdkPatcher
                 targetCall = instr[i]; retAfter = instr[i + 1]; break;
             }
             if (targetCall == null) continue;
+            // Idempotency: skip if this method was already wrapped (has an IOException catch).
+            if (method.Body.ExceptionHandlers.Any(h => h.CatchType?.Name == "IOException")) continue;
 
             var afterHandler = retAfter!.OpCode == OpCodes.Pop
                 ? instr[instr.IndexOf(retAfter) + 1]
@@ -114,16 +135,18 @@ static class PdxSdkPatcher
         }
 
         // ---- FIX 3: CreateLongPathDirectory — skip PathExists check per segment ----
-        ApplyPathExistsBypass(diskIO, "CreateLongPathDirectory", nopBefore: 2, dryRun, ref applied);
+        if (!SkipFix(3)) ApplyPathExistsBypass(diskIO, "CreateLongPathDirectory", nopBefore: 2, dryRun, ref applied);
 
         // ---- FIX 4: CreateDirectory — skip PathExists early exit ----
-        ApplyPathExistsBypass(diskIO, "CreateDirectory", nopBefore: 2, dryRun, ref applied);
+        if (!SkipFix(4)) ApplyPathExistsBypass(diskIO, "CreateDirectory", nopBefore: 2, dryRun, ref applied);
 
         // ---- FIX 5: CreateWriteStream — always create parent directory ----
+        // (fileIO is declared here ungated — FIX 15/16 need it regardless of skip)
         var fileIO = module.Types.FirstOrDefault(t => t.Name == "FileIO");
-        if (fileIO != null) ApplyPathExistsBypass(fileIO, "CreateWriteStream", nopBefore: 3, dryRun, ref applied);
+        if (!SkipFix(5) && fileIO != null) ApplyPathExistsBypass(fileIO, "CreateWriteStream", nopBefore: 3, dryRun, ref applied);
 
         // ---- FIX 6: GetLongPath — replace '/' with '\\' in Replace call ----
+        if (!SkipFix(6))
         {
             var getLongPath = diskIO.Methods.FirstOrDefault(m => m.Name == "GetLongPath");
             if (getLongPath?.HasBody == true)
@@ -142,7 +165,7 @@ static class PdxSdkPatcher
         }
 
         // ---- FIX 7: CancellationToken checks — force IsCancellationRequested = false ----
-        foreach (var type in module.Types)
+        if (!SkipFix(7)) foreach (var type in module.Types)
         {
             var allMethods = type.Methods.Concat(type.NestedTypes.SelectMany(n => n.Methods));
             foreach (var method in allMethods)
@@ -187,6 +210,7 @@ static class PdxSdkPatcher
         }
 
         // ---- FIX 8: CreateLongPathFileStream — NOP invalid-handle IOException ----
+        if (!SkipFix(8))
         {
             var clpfs = diskIO.Methods.FirstOrDefault(m => m.Name == "CreateLongPathFileStream");
             if (clpfs?.HasBody == true)
@@ -205,6 +229,7 @@ static class PdxSdkPatcher
         }
 
         // ---- FIX 9: DownloadFilesInManifest — always re-download ----
+        if (!SkipFix(9))
         {
             var remoteRepo = module.Types.FirstOrDefault(t => t.Name == "RemoteRepository");
             var dfimSM = remoteRepo?.NestedTypes.FirstOrDefault(t => t.Name.Contains("DownloadFilesInManifest"));
@@ -229,6 +254,7 @@ static class PdxSdkPatcher
         }
 
         // ---- FIX 10: InstallToFolder — bypass GetInstalledVersion error ----
+        if (!SkipFix(10))
         {
             var executor = module.Types.FirstOrDefault(t => t.Name == "Executor");
             var installSM = executor?.NestedTypes.FirstOrDefault(t => t.Name == "<InstallToFolder>d__13");
@@ -250,6 +276,7 @@ static class PdxSdkPatcher
         }
 
         // ---- FIX 11: TaskCanceledException → treat as regular exception ----
+        if (!SkipFix(11))
         {
             var resultFactory = module.Types.FirstOrDefault(t => t.Name == "ResultFactory");
             var method = resultFactory?.Methods.FirstOrDefault(m => m.Name == "CreateFileIoResultFromException");
@@ -269,7 +296,7 @@ static class PdxSdkPatcher
         }
 
         // ---- FIX 12: IsCancelledOperation checks — force false ----
-        foreach (var type in module.Types)
+        if (!SkipFix(12)) foreach (var type in module.Types)
         {
             var allMethods = type.Methods.Concat(type.NestedTypes.SelectMany(n => n.Methods));
             foreach (var method in allMethods)
@@ -308,6 +335,7 @@ static class PdxSdkPatcher
         }
 
         // ---- FIX 13: PerformDownload — skip PathExists (Wine returns true for non-existent files) ----
+        if (!SkipFix(13))
         {
             var fileDownloader = module.Types.FirstOrDefault(t => t.Name == "FileDownloader");
             var pdSM = fileDownloader?.NestedTypes.FirstOrDefault(t => t.Name.Contains("PerformDownload"));
@@ -331,12 +359,17 @@ static class PdxSdkPatcher
         // ---- FIX 14: FileAlreadyDownloaded — always return Task<false> ----
         // Prevents CheckIntegrity from acquiring a reader lock on a non-existent file.
         // On v1.5.8f1+ this is superseded by FIX 16, but kept for older version compatibility.
+        if (!SkipFix(14))
         {
             var remoteRepo = module.Types.FirstOrDefault(t => t.Name == "RemoteRepository");
             var fad = remoteRepo?.Methods.FirstOrDefault(m => m.Name == "FileAlreadyDownloaded");
             if (fad?.HasBody == true)
             {
-                if (!dryRun)
+                var fbody = fad.Body.Instructions;
+                bool alreadyFad = fbody.Count == 3 && fbody[0].OpCode == OpCodes.Ldc_I4_0
+                    && fbody[1].OpCode == OpCodes.Call
+                    && (fbody[1].Operand as MethodReference)?.Name == "FromResult";
+                if (!alreadyFad && !dryRun)
                 {
                     var taskType = new TypeReference("System.Threading.Tasks", "Task", module, mscorlib);
                     var fromResultOpen = new MethodReference("FromResult", module.TypeSystem.Void, taskType);
@@ -358,7 +391,7 @@ static class PdxSdkPatcher
                     ilp.Append(ilp.Create(OpCodes.Call, fromResultRef));
                     ilp.Append(ilp.Create(OpCodes.Ret));
                 }
-                applied++;
+                if (!alreadyFad) applied++;
             }
         }
 
@@ -366,11 +399,15 @@ static class PdxSdkPatcher
         // CancellationTokenSource(TimeSpan.FromSeconds(10)) uses a Win32 waitable timer
         // which fires in milliseconds under Wine, cancelling every download attempt.
         // Fix: replace body with ldarg.1; ret — return the input token unchanged.
+        if (!SkipFix(15))
         {
             var getLockToken = fileIO?.Methods.FirstOrDefault(m => m.Name == "GetLockToken");
             if (getLockToken?.HasBody == true)
             {
-                if (!dryRun)
+                var gbody = getLockToken.Body.Instructions;
+                bool alreadyGlt = gbody.Count == 2
+                    && gbody[0].OpCode == OpCodes.Ldarg_1 && gbody[1].OpCode == OpCodes.Ret;
+                if (!alreadyGlt && !dryRun)
                 {
                     getLockToken.Body.Instructions.Clear();
                     getLockToken.Body.ExceptionHandlers.Clear();
@@ -379,7 +416,7 @@ static class PdxSdkPatcher
                     ilp.Append(ilp.Create(OpCodes.Ldarg_1));
                     ilp.Append(ilp.Create(OpCodes.Ret));
                 }
-                applied++;
+                if (!alreadyGlt) applied++;
             }
         }
 
@@ -389,6 +426,7 @@ static class PdxSdkPatcher
         // returns without calling lockResult.Dispose() → _readSemaphore stays at 0 → next
         // AcquireWriterLock blocks on _readSemaphore forever. All subsequent downloads hang.
         // Fix: insert lockResult.Dispose() before each leave in the IOException catch block.
+        if (!SkipFix(16))
         {
             var createFsSM = fileIO?.NestedTypes.FirstOrDefault(t => t.Name.Contains("CreateFileStream"));
             var moveNext = createFsSM?.Methods.FirstOrDefault(m => m.Name == "MoveNext");
@@ -403,58 +441,59 @@ static class PdxSdkPatcher
 
                 if (lockVar != null && disposeRef != null)
                 {
-                    int insertions = 0;
-                    if (!dryRun)
+                    var instrs = moveNext.Body.Instructions;
+                    bool AlreadyDisposed(Instruction lv)
                     {
-                        var ilp = moveNext.Body.GetILProcessor();
-                        var dispose = module.ImportReference(disposeRef);
-                        foreach (var handler in moveNext.Body.ExceptionHandlers)
+                        int li = instrs.IndexOf(lv);
+                        return li >= 1 && instrs[li - 1].OpCode == OpCodes.Callvirt
+                            && (instrs[li - 1].Operand as MethodReference)?.Name == "Dispose";
+                    }
+
+                    // Leaves in the IOException catch that don't already dispose the lock. The
+                    // AlreadyDisposed guard makes this fix idempotent — a re-run must not insert
+                    // a second Dispose before a leave that already has one (that would accumulate
+                    // extra Dispose calls on every apply and corrupt the method).
+                    var targets = new List<Instruction>();
+                    foreach (var handler in moveNext.Body.ExceptionHandlers)
+                    {
+                        if (handler.HandlerType != ExceptionHandlerType.Catch) continue;
+                        var hbody = instrs.SkipWhile(i => i != handler.HandlerStart)
+                                          .TakeWhile(i => i != handler.HandlerEnd).ToList();
+                        bool isIoCatch = hbody.Any(i =>
+                            (i.OpCode == OpCodes.Call || i.OpCode == OpCodes.Callvirt) &&
+                            i.Operand?.ToString()?.Contains("CreateIoResultFromException") == true);
+                        if (!isIoCatch) continue;
+                        targets.AddRange(hbody.Where(i =>
+                            (i.OpCode == OpCodes.Leave || i.OpCode == OpCodes.Leave_S) && !AlreadyDisposed(i)));
+                    }
+
+                    if (targets.Count > 0)
+                    {
+                        if (!dryRun)
                         {
-                            if (handler.HandlerType != ExceptionHandlerType.Catch) continue;
-                            var body = moveNext.Body.Instructions
-                                .SkipWhile(i => i != handler.HandlerStart)
-                                .TakeWhile(i => i != handler.HandlerEnd)
-                                .ToList();
-                            bool isIoCatch = body.Any(i =>
-                                (i.OpCode == OpCodes.Call || i.OpCode == OpCodes.Callvirt) &&
-                                i.Operand?.ToString()?.Contains("CreateIoResultFromException") == true);
-                            if (!isIoCatch) continue;
-                            foreach (var leave in body
-                                .Where(i => i.OpCode == OpCodes.Leave || i.OpCode == OpCodes.Leave_S)
-                                .ToList())
+                            var ilp = moveNext.Body.GetILProcessor();
+                            var dispose = module.ImportReference(disposeRef);
+                            foreach (var leave in targets)
                             {
                                 ilp.InsertBefore(leave, ilp.Create(OpCodes.Ldloc_S, lockVar));
                                 ilp.InsertBefore(leave, ilp.Create(OpCodes.Callvirt, dispose));
-                                insertions++;
                             }
                         }
+                        applied++;
                     }
-                    else
-                    {
-                        foreach (var handler in moveNext.Body.ExceptionHandlers)
-                        {
-                            if (handler.HandlerType != ExceptionHandlerType.Catch) continue;
-                            var body = moveNext.Body.Instructions
-                                .SkipWhile(i => i != handler.HandlerStart)
-                                .TakeWhile(i => i != handler.HandlerEnd)
-                                .ToList();
-                            if (body.Any(i => (i.OpCode == OpCodes.Call || i.OpCode == OpCodes.Callvirt) &&
-                                i.Operand?.ToString()?.Contains("CreateIoResultFromException") == true))
-                                insertions += body.Count(i => i.OpCode == OpCodes.Leave || i.OpCode == OpCodes.Leave_S);
-                        }
-                    }
-                    if (insertions > 0) applied++;
                 }
             }
         }
 
-        // ---- FIX 17: ListFiles/ListDirectories/ListFilesRecursive — IOException: Success on Wine ----
+        // ---- FIX 17: ListFiles/ListDirectories — IOException: Success on Wine ----
         // Wine's Directory.GetFiles/GetDirectories throws IOException with empty/"Success" message
         // when the directory doesn't exist (instead of returning empty or throwing
         // DirectoryNotFoundException). The PathExists early-exit guard is useless because Wine's
         // GetFileAttributes lies. Fix: wrap each method body in try-catch(IOException) returning
         // an empty list. The existing newobj List<string>::.ctor() reference is reused.
-        foreach (var name in new[] { "ListFiles", "ListDirectories", "ListFilesRecursive" })
+        // ListFilesRecursive is intentionally NOT wrapped: on v1.6.0f1 its empty return hangs
+        // the init-time mod scan; it's left to throw (and be caught by PerformDiskOperationAndCatch).
+        if (!SkipFix(17)) foreach (var name in new[] { "ListFiles", "ListDirectories" })
         {
             var method = diskIO.Methods.FirstOrDefault(m => m.Name == name);
             if (method?.HasBody != true) continue;
@@ -481,7 +520,7 @@ static class PdxSdkPatcher
 
         if (!dryRun)
         {
-            BackupAndWrite(module, dllPath);
+            PatchIo.BackupAndWrite(module, dllPath);
             return new PatchSummary("PDX.SDK.dll", applied, DryRun: false);
         }
 
@@ -565,13 +604,4 @@ static class PdxSdkPatcher
         }
     }
 
-    static void BackupAndWrite(ModuleDefinition module, string dllPath)
-    {
-        var backup = dllPath + ".bak";
-        if (!File.Exists(backup)) File.Copy(dllPath, backup);
-        var tmp = dllPath + ".tmp";
-        module.Write(tmp);
-        module.Dispose();
-        File.Move(tmp, dllPath, overwrite: true);
-    }
 }

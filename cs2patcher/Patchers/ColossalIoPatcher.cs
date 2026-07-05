@@ -71,7 +71,7 @@ static class ColossalIoPatcher
 
         if (!dryRun)
         {
-            BackupAndWrite(module, dllPath);
+            PatchIo.BackupAndWrite(module, dllPath);
             return new PatchSummary("Colossal.IO.dll", applied, DryRun: false);
         }
 
@@ -79,13 +79,4 @@ static class ColossalIoPatcher
         return new PatchSummary("Colossal.IO.dll", applied, DryRun: true);
     }
 
-    static void BackupAndWrite(ModuleDefinition module, string dllPath)
-    {
-        var backup = dllPath + ".bak";
-        if (!File.Exists(backup)) File.Copy(dllPath, backup);
-        var tmp = dllPath + ".tmp";
-        module.Write(tmp);
-        module.Dispose();
-        File.Move(tmp, dllPath, overwrite: true);
-    }
 }

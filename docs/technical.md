@@ -223,6 +223,17 @@ End:
 
 Why we keep the (useless) `PathExists` check: it costs nothing on Wine (always falls through) and remains correct on Windows where `PathExists` returns the real answer.
 
+**v1.6.0f1 update — `ListFilesRecursive` is excluded by default.** On game v1.6.0f1, applying
+this wrap to `ListFilesRecursive` **hangs the game at the Paradox logo** (SDK init). The
+init-time recursive mod scan calls `ListFilesRecursive`; when the wrap makes it return an empty
+list instead of throwing, the SDK reads that as "success + empty" and loops instead of breaking
+out on the error, so the process never reaches the menu. Confirmed by bisection: patching only
+`ListFiles` + `ListDirectories` boots *and* downloads mods correctly; adding `ListFilesRecursive`
+reintroduces the hang. The download path (`PrepareFolderForPatching` → `ClearFolderAndKeepPatchFile`)
+only needs `ListFiles`/`ListDirectories`, so `ListFilesRecursive` is left unpatched — it throws
+`IOException: Success`, which `FileIO.PerformDiskOperationAndCatch` already handles. The bisection
+tooling is `CS2_PDX_SKIP="7,12,17,…"` in `PdxSdkPatcher`, which skips any FIX number.
+
 ---
 
 ## IL comparison: FIX 15 + FIX 16 verified against v1.5.8f1
