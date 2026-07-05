@@ -16,15 +16,16 @@ Tested: **CrossOver 26 · Game v1.5.8f1 · Apple Silicon (M3 Pro)**
 Open Terminal, paste this, press Enter:
 
 ```bash
-git clone https://github.com/alien-agent/cs2-macos-patcher && python3 cs2-macos-patcher/patch.py
+git clone https://github.com/alien-agent/cs2-macos-patcher && cd cs2-macos-patcher && ./patch.py
 ```
 
-The script will:
+`patch.py` is a single **guided, interactive** tool. It walks you through:
 
-1. Find your game automatically across all CrossOver bottles
-2. Ask you to choose Lightweight or Full patch
-3. Install dotnet via Homebrew automatically if needed (Full patch only)
-4. Apply the patches and back up original DLLs
+1. **Finds your game** automatically across all CrossOver bottles, and shows whether it's already patched
+2. Lets you pick **Lightweight** or **Full**
+3. **Previews the change first** (a dry-run that writes nothing), then asks you to confirm
+4. **Applies** the patches and backs up the originals to `*.bak`
+5. Installs dotnet via Homebrew automatically if needed
 
 > **No dotnet?** No problem — the patcher installs it for you. You only
 > need [Homebrew](https://brew.sh).
@@ -34,13 +35,16 @@ The script will:
 
 ### After a game update
 
-Re-run the same command. The patcher detects already-patched files and skips them, then applies any
-new fixes to updated DLLs.
+Re-run `./patch.py` and pick your patch mode again. The preview and the patcher both detect
+already-patched files and skip them, then apply any new fixes to updated DLLs — it's always safe to
+re-run.
 
 ### Can't find the game automatically?
 
+Pass the Managed folder directly:
+
 ```bash
-python3 cs2-macos-patcher/patch.py "/path/to/Cities2_Data/Managed"
+./patch.py "/path/to/Cities2_Data/Managed"
 ```
 
 The Managed folder is typically inside your CrossOver bottle:
@@ -52,7 +56,9 @@ The Managed folder is typically inside your CrossOver bottle:
 
 ### Restoring original DLLs
 
-The patcher prints exact restore commands at the end of each run. In general:
+Run `./patch.py` and choose **Restore original files** — it copies every `*.bak` back over its DLL.
+
+Prefer to do it by hand? The backups are plain copies:
 
 ```bash
 cd "<path-to>/Cities2_Data/Managed"
@@ -60,8 +66,6 @@ cp Colossal.IO.dll.bak Colossal.IO.dll
 cp Colossal.IO.AssetDatabase.dll.bak Colossal.IO.AssetDatabase.dll
 cp PDX.SDK.dll.bak PDX.SDK.dll          # Full patch only
 ```
-
-Then re-run the patcher.
 
 ---
 
@@ -125,7 +129,8 @@ Mods patches.
        files, causing the code to acquire a reader lock, fail to open the file, and exit the
        exception handler without releasing the lock. All subsequent write attempts for the same path
        hang forever.
-- **Single-command setup** — `python3 patch.py` handles everything including dotnet installation.
+- **Single guided command** — `./patch.py` handles everything: a dry-run **preview before
+  applying**, in-menu **restore**, and automatic dotnet installation.
 - **Auto-detection** of game across all CrossOver bottles.
 - **Lightweight / Full split** — game-launch fixes require no extra dependencies; Paradox Mods patch
   installs dotnet automatically if needed.

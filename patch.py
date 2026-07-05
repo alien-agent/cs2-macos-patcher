@@ -9,9 +9,28 @@ import sys
 import subprocess
 import shutil
 import glob
+import filecmp
+import termios
+import tty
+import select
+import hashlib
+import json
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PATCHER_PROJECT = os.path.join(SCRIPT_DIR, "cs2patcher")
+
+# Which DLLs each mode patches (full = lightweight + PDX.SDK). The C# patcher is the
+# real authority; this mirror lets patch.py report status without invoking dotnet.
+MODE_DLLS = {
+    "lightweight": ["Colossal.IO.dll", "Colossal.IO.AssetDatabase.dll"],
+    "full":        ["Colossal.IO.dll", "Colossal.IO.AssetDatabase.dll", "PDX.SDK.dll"],
+}
+DLLS = MODE_DLLS["full"]
+
+# Records the sha256 of each DLL as we patched it. A later game update replaces the
+# DLL out from under its (now stale) .bak; without this record a plain byte-compare
+# would mistake the fresh original for a patch and let Restore downgrade the install.
+MANIFEST = ".cs2patch.json"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Colours
@@ -195,23 +214,164 @@ def shorten(path):
     return "~" + path[len(home):] if path.startswith(home) else path
 
 
-def print_dll_status(managed_dir):
-    dlls = ["Colossal.IO.dll", "Colossal.IO.AssetDatabase.dll", "PDX.SDK.dll"]
-    print("Game files:")
-    for dll in dlls:
-        exists  = os.path.isfile(os.path.join(managed_dir, dll))
-        patched = os.path.isfile(os.path.join(managed_dir, dll + ".bak"))
-        mark  = green("✓") if exists else red("✗")
-        extra = yellow("  (already patched)") if patched else ""
-        print(f"  {mark} {dll:<44}{extra}")
+def _sha(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
-def ask(prompt, valid):
-    while True:
-        val = input(prompt).strip().upper()
-        if val in valid:
-            return val
-        print(f"  Please enter one of: {', '.join(sorted(valid))}")
+def load_manifest(managed_dir):
+    try:
+        with open(os.path.join(managed_dir, MANIFEST)) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_manifest(managed_dir, data):
+    path = os.path.join(managed_dir, MANIFEST)
+    if data:
+        with open(path, "w") as f:
+            json.dump(data, f)
+    elif os.path.isfile(path):
+        os.remove(path)
+
+
+def dll_state(managed_dir, dll):
+    """Return 'missing', 'patched', or 'original'.
+
+    Prefer the manifest (sha of the exact bytes we wrote): if it lists this DLL and
+    the sha still matches, it's our patch; if it no longer matches, the game updated
+    the file, so it's an unpatched original again. Fall back to a byte-compare against
+    the .bak for installs patched before the manifest existed."""
+    path = os.path.join(managed_dir, dll)
+    if not os.path.isfile(path):
+        return "missing"
+    manifest = load_manifest(managed_dir)
+    if dll in manifest:
+        return "patched" if _sha(path) == manifest[dll] else "original"
+    bak = path + ".bak"
+    if os.path.isfile(bak) and not filecmp.cmp(path, bak, shallow=False):
+        return "patched"
+    return "original"
+
+
+def record_patched(managed_dir, mode):
+    """After an apply, record the sha of each DLL the mode actually patched (differs
+    from its .bak); drop entries for targets left unpatched. Lets status/restore tell
+    our patch apart from a later game update."""
+    manifest = load_manifest(managed_dir)
+    for dll in MODE_DLLS[mode]:
+        path = os.path.join(managed_dir, dll)
+        bak = path + ".bak"
+        if (os.path.isfile(path) and os.path.isfile(bak)
+                and not filecmp.cmp(path, bak, shallow=False)):
+            manifest[dll] = _sha(path)
+        else:
+            manifest.pop(dll, None)
+    save_manifest(managed_dir, manifest)
+
+
+def restore_dlls(managed_dir):
+    """Copy each *.bak back over its DLL. Returns count restored. Skips a DLL whose
+    current bytes no longer match the patch we recorded — that means the game updated
+    it, and restoring the stale backup would downgrade the install."""
+    manifest = load_manifest(managed_dir)
+    restored = 0
+    for dll in DLLS:
+        path = os.path.join(managed_dir, dll)
+        bak = path + ".bak"
+        if not os.path.isfile(bak):
+            continue
+        if dll in manifest and (not os.path.isfile(path) or _sha(path) != manifest[dll]):
+            print(yellow(f"  skipped   {dll} — changed since patch (game update?), not restoring"))
+            continue
+        shutil.copy2(bak, path)
+        print(green(f"  restored  {dll}"))
+        manifest.pop(dll, None)
+        restored += 1
+    save_manifest(managed_dir, manifest)
+    if restored == 0:
+        print(yellow("  No backups found — nothing to restore."))
+    return restored
+
+
+def menu(title, options):
+    """Arrow-key menu: ↑/↓ or j/k to move, Enter to select, q to pick the last
+    option. Returns the selected index. Callers must make the last option the
+    cancel/quit choice — q and EOF both resolve to it. Falls back to a numbered
+    prompt when stdin is not a TTY (pipes / CI) so the tool stays scriptable."""
+    print(title)
+
+    if not sys.stdin.isatty():
+        for i, opt in enumerate(options, 1):
+            print(f"  {i}) {opt}")
+        raw = sys.stdin.readline().strip().lower()
+        try:
+            n = int(raw)
+            if 1 <= n <= len(options):
+                return n - 1
+        except ValueError:
+            pass
+        return len(options) - 1     # q / EOF / blank / out-of-range → cancel (last)
+
+    sel = 0
+    # Keep every option on exactly one row; a wrapped label would desync the
+    # cursor-up count below and smear the menu during redraws.
+    width = shutil.get_terminal_size((80, 24)).columns
+
+    def render(first):
+        if not first:
+            sys.stdout.write(f"\033[{len(options)}A")
+        for i, opt in enumerate(options):
+            text = opt[:max(1, width - 6)]
+            if i == sel:
+                sys.stdout.write(f"\r  \033[7m ❯ {text} \033[0m\033[K\n")
+            else:
+                sys.stdout.write(f"\r    {text}\033[K\n")
+        sys.stdout.flush()
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        render(True)
+        while True:
+            # Read raw bytes straight from the fd — sys.stdin's buffered text
+            # layer does not reliably deliver escape sequences in raw mode.
+            ch = os.read(fd, 1)
+            if ch == b"\x1b":
+                # An arrow key follows ESC with more bytes immediately; a lone ESC
+                # (or Alt+key) does not. Poll for the rest instead of a blocking
+                # os.read(fd, 2), which would hang forever on a bare ESC.
+                seq = b""
+                while len(seq) < 2 and select.select([fd], [], [], 0.02)[0]:
+                    seq += os.read(fd, 1)
+                if seq in (b"[A", b"OA"):
+                    sel = (sel - 1) % len(options)
+                elif seq in (b"[B", b"OB"):
+                    sel = (sel + 1) % len(options)
+                elif seq == b"":            # bare ESC = cancel
+                    sel = len(options) - 1
+                    break
+            elif ch in (b"k", b"K"):
+                sel = (sel - 1) % len(options)
+            elif ch in (b"j", b"J"):
+                sel = (sel + 1) % len(options)
+            elif ch in (b"\r", b"\n"):
+                break
+            elif ch in (b"q", b"Q"):
+                sel = len(options) - 1
+                break
+            elif ch == b"\x03":  # Ctrl-C
+                raise KeyboardInterrupt
+            render(False)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    return sel
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -221,7 +381,7 @@ def ask(prompt, valid):
 def main():
     print(cyan(bold("=================================================")))
     print(cyan(bold("  Cities: Skylines 2 — macOS / Wine Patcher")))
-    print(cyan(bold("  Tested: CrossOver 26 · Game v1.5.8f1")))
+    print(cyan(bold("  Tested: CrossOver 26 · Game v1.5.8f1–v1.6.0f1")))
     print(cyan(bold("=================================================")))
     print()
 
@@ -247,72 +407,115 @@ def main():
             managed_dir = found[0]
         else:
             print()
-            for i, p in enumerate(found, 1):
-                print(f"  [{i}] {shorten(p)}")
-            print("  [M] Enter path manually")
-            print("  [Q] Quit\n")
-            valid = {str(i) for i in range(1, len(found) + 1)} | {"M", "Q"}
-            sel = ask("Select: ", valid)
-            if sel == "Q":
+            options = [shorten(p) for p in found] + ["Enter path manually", "Quit"]
+            idx = menu("Multiple installations found:", options)
+            if idx == len(found) + 1:        # Quit
                 return
-            if sel == "M":
+            if idx == len(found):            # Enter path manually
                 managed_dir = os.path.expanduser(input("Path: ").strip())
             else:
-                managed_dir = found[int(sel) - 1]
+                managed_dir = found[idx]
 
     if not _is_valid_managed(managed_dir):
         print(red(f"\n  '{managed_dir}' does not look like a valid Managed directory."))
         sys.exit(1)
 
-    print()
-    print_dll_status(managed_dir)
+    # ── Current patch status ─────────────────────────────────────────────────
+    # Mode is derived from which DLLs are patched, keyed off MODE_DLLS so the
+    # definition of each mode lives in one place.
+    state = {d: dll_state(managed_dir, d) for d in DLLS}
+    core_patched = all(state[d] == "patched" for d in MODE_DLLS["lightweight"])
+    full_patched = all(state[d] == "patched" for d in MODE_DLLS["full"])
+    any_patched = any(v == "patched" for v in state.values())
+    missing = [d for d in DLLS if state[d] == "missing"]
+
+    if full_patched:
+        print("  " + green(bold("● Already patched — Full (Lightweight + Paradox Mods)")))
+    elif core_patched:
+        print("  " + green(bold("● Already patched — Lightweight")))
+    elif any_patched:
+        print("  " + yellow(bold("● Partially patched — re-patch to complete")))
+    else:
+        print("  " + cyan("○ Not patched yet"))
+    if missing:
+        print("  " + yellow("⚠ Missing DLL(s): " + ", ".join(missing)))
     print()
 
-    # ── Step 2: choose mode ──────────────────────────────────────────────────
-    print("Choose patch mode:\n")
-    print("  [1] Lightweight  — fixes game launch and asset loading")
-    print("                     (Colossal.IO.dll + Colossal.IO.AssetDatabase.dll)\n")
-    print("  [2] Full patch   — lightweight + Paradox Mods fix")
-    print("                     (+ PDX.SDK.dll)  requires dotnet (auto-installed if needed)\n")
-    print("  [Q] Quit\n")
-    mode_sel = ask("Mode: ", {"1", "2", "Q"})
-    if mode_sel == "Q":
+    # ── Step 2: choose action ────────────────────────────────────────────────
+    # "Re-Patch" appears when that mode is already applied; the patcher is
+    # idempotent, so re-patching is the safe thing to do after a game update.
+    lw_verb   = f"{'Re-Patch' if core_patched else 'Patch':<8}"
+    full_verb = f"{'Re-Patch' if full_patched else 'Patch':<8}"
+    actions = [
+        ("lightweight", f"{lw_verb} — Lightweight  (fixes launch + asset loading)"),
+        ("full",        f"{full_verb} — Full         (lightweight + Paradox Mods)"),
+    ]
+    if any_patched:                       # Restore only when there's something to undo
+        actions.append(("restore", "Restore original files"))
+    actions.append(("quit", "Quit"))
+
+    choice = menu("What would you like to do?   (↑/↓ to move, Enter to select)",
+                  [label for _, label in actions])
+    action = actions[choice][0]
+
+    if action == "quit":
+        print("\nCancelled.")
+        return
+    if action == "restore":
+        print()
+        restore_dlls(managed_dir)
+        print()
         return
 
-    full_patch = (mode_sel == "2")
-    mode = "full" if full_patch else "lightweight"
-    print()
+    mode = action                        # "lightweight" or "full"
 
     # ── Step 3: ensure dotnet ────────────────────────────────────────────────
     # dotnet is always needed to run the C# patcher (it's not a compiled binary)
-    print("Checking for dotnet...")
+    print("\nChecking for dotnet...")
     dotnet = ensure_dotnet()
     print(f"  {green('✓')} dotnet: {dotnet}\n")
 
-    # ── Step 4: patch ────────────────────────────────────────────────────────
-    print("Patching...\n")
-    ok = run_patcher(dotnet, managed_dir, mode, apply=True)
+    # ── Step 4: preview (dry-run, writes nothing) ────────────────────────────
+    print(f"Step 1 of 2 — Preview ({mode}). Nothing is written yet.")
+    print("─" * 60)
+    preview_ok = run_patcher(dotnet, managed_dir, mode, apply=False)
+    print("─" * 60)
+    if not preview_ok:
+        print(yellow("  Preview reported warnings — review the output above before applying."))
     print()
 
-    # ── Step 5: summary ──────────────────────────────────────────────────────
+    if menu("Apply these changes now?", ["Yes, apply", "No, cancel"]) != 0:
+        print("\nNot applied. Nothing was changed.")
+        return
+
+    # ── Step 5: apply ────────────────────────────────────────────────────────
+    print(f"\nStep 2 of 2 — Applying ({mode}). Originals are backed up to *.bak.")
+    print("─" * 60)
+    ok = run_patcher(dotnet, managed_dir, mode, apply=True)
+    print("─" * 60 + "\n")
+
+    # ── Step 6: verify outcome & summarise ───────────────────────────────────
     if ok:
-        print(green("All done!") + "\n")
-        if full_patch:
-            print("  Paradox Mods: launch the game and use the in-game mod browser.\n")
+        record_patched(managed_dir, mode)     # snapshot what we patched (see MANIFEST)
+        # Trust the result, not the patcher's report: a game update can change method
+        # bodies so patterns silently stop matching, leaving a DLL unpatched while the
+        # patcher still reports SKIP / "already patched". Verify the bytes changed.
+        unpatched = [d for d in MODE_DLLS[mode] if dll_state(managed_dir, d) != "patched"]
+        if unpatched:
+            print(yellow("⚠ Not fully patched. These DLLs did not change — this game"))
+            print(yellow("  version may be unsupported (patch patterns didn't match):"))
+            print(yellow("    " + ", ".join(unpatched)))
+            print(yellow("  The game will likely still misbehave; please report the game version.\n"))
         else:
-            print("  Game should now launch. Run again with Full patch to enable Paradox Mods.\n")
+            print(green("All done!") + "\n")
+            if mode == "full":
+                print("  Paradox Mods: launch the game and use the in-game mod browser.\n")
+            else:
+                print("  Game should now launch. Run again and pick Full to enable Paradox Mods.\n")
     else:
         print(yellow("Completed with warnings — check the output above.\n"))
 
-    print("To restore original DLLs:")
-    print(f'  cd "{managed_dir}"')
-    for dll in ["Colossal.IO.dll", "Colossal.IO.AssetDatabase.dll"] + \
-               (["PDX.SDK.dll"] if full_patch else []):
-        bak = os.path.join(managed_dir, dll + ".bak")
-        if os.path.isfile(bak):
-            print(f'  cp "{dll}.bak" "{dll}"')
-
-    print()
+    print("To undo later: run ./patch.py again and choose Restore.\n")
 
 
 if __name__ == "__main__":
