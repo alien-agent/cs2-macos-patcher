@@ -2,7 +2,7 @@
 
 Fixes crashes and enables Paradox Mods for **Cities: Skylines 2** running under CrossOver on macOS.
 
-Tested: **CrossOver 26 · Game v1.5.8f1 · Apple Silicon (M3 Pro)**
+Tested: **CrossOver 26 · Game v1.5.8f1–v1.6.0f1 · Apple Silicon (M3 Pro → M5 Max)**
 
 > **Elevated networks snapping to the ground?** That's a *separate* Apple Silicon bug (Rosetta
 > miscompiles Unity's Burst SIMD code and drops the height value), so raised roads, bridges and pipes
