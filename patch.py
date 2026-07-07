@@ -22,8 +22,8 @@ PATCHER_PROJECT = os.path.join(SCRIPT_DIR, "cs2patcher")
 # Which DLLs each mode patches (full = lightweight + PDX.SDK). The C# patcher is the
 # real authority; this mirror lets patch.py report status without invoking dotnet.
 MODE_DLLS = {
-    "lightweight": ["Colossal.IO.dll", "Colossal.IO.AssetDatabase.dll"],
-    "full":        ["Colossal.IO.dll", "Colossal.IO.AssetDatabase.dll", "PDX.SDK.dll"],
+    "lightweight": ["Colossal.IO.dll", "Colossal.IO.AssetDatabase.dll", "Game.dll"],
+    "full":        ["Colossal.IO.dll", "Colossal.IO.AssetDatabase.dll", "Game.dll", "PDX.SDK.dll"],
 }
 DLLS = MODE_DLLS["full"]
 
@@ -495,8 +495,12 @@ def main():
     print("─" * 60 + "\n")
 
     # ── Step 6: verify outcome & summarise ───────────────────────────────────
+    # Always snapshot what actually patched (record_patched only records DLLs whose bytes
+    # differ from their .bak, and drops the rest). Gating this on `ok` meant one DLL's WARN
+    # discarded the manifest entries for the DLLs that DID patch, dropping their game-update
+    # downgrade protection — so record unconditionally after an apply.
+    record_patched(managed_dir, mode)         # snapshot what we patched (see MANIFEST)
     if ok:
-        record_patched(managed_dir, mode)     # snapshot what we patched (see MANIFEST)
         # Trust the result, not the patcher's report: a game update can change method
         # bodies so patterns silently stop matching, leaving a DLL unpatched while the
         # patcher still reports SKIP / "already patched". Verify the bytes changed.

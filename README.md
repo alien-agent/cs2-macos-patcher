@@ -64,6 +64,7 @@ Prefer to do it by hand? The backups are plain copies:
 cd "<path-to>/Cities2_Data/Managed"
 cp Colossal.IO.dll.bak Colossal.IO.dll
 cp Colossal.IO.AssetDatabase.dll.bak Colossal.IO.AssetDatabase.dll
+cp Game.dll.bak Game.dll                # fixes the in-game pause menu (Esc / gear)
 cp PDX.SDK.dll.bak PDX.SDK.dll          # Full patch only
 ```
 
@@ -129,6 +130,10 @@ Mods patches.
        files, causing the code to acquire a reader lock, fail to open the file, and exit the
        exception handler without releasing the lock. All subsequent write attempts for the same path
        hang forever.
+- **In-game pause menu fix (`Game.dll`).** The modding toolchain's Rider-IDE probe throws on
+  Wine's lying `File.Exists`/`Directory.Exists` during load; that thrown exception leaves the
+  **Esc / gear pause menu unable to open**. Forcing the two existence checks to `false` (the
+  truth under Wine) stops the throw and the menu works. Part of Lightweight.
 - **Single guided command** — `./patch.py` handles everything: a dry-run **preview before
   applying**, in-menu **restore**, and automatic dotnet installation.
 - **Auto-detection** of game across all CrossOver bottles.

@@ -236,6 +236,70 @@ tooling is `CS2_PDX_SKIP="7,12,17,…"` in `PdxSdkPatcher`, which skips any FIX 
 
 ---
 
+### FIX 18: RiderPathLocator — in-game pause menu (Esc / gear) won't open on Wine
+
+**Target:** `Game.dll` (a new patch target — the modding toolchain lives here, not in
+`Colossal.IO`/`PDX.SDK`).
+
+**Symptom:** In-game, the **pause menu does not open** — neither **Esc** nor the **gear
+icon** shows the popup. Everything else works: gameplay, autosave, mods, and the **Tab/Home
+developer menu open fine** (so overlays render — it is not a CrossOver fullscreen issue).
+With `-uiDeveloperMode`, pressing Esc/gear produces **no JS error and no cohtml activity** —
+the menu simply never mounts.
+
+**Log evidence:**
+```
+DirectoryNotFoundException: Could not find a part of the path
+  "C:\users\crossover\AppData\Local\JetBrains\Toolbox\.settings.json"
+  at System.IO.File.ReadAllText(...)
+  at ...RiderPathLocator.GetToolboxRiderRootPath(String) / GetToolboxBaseDir()
+  / CollectRiderInfosWindows() / GetAllRiderPaths()
+  ... RiderDependency.GetIDEVersion → ToolchainDependencyManager.GetDeploymentState
+```
+
+**Root cause:** On game load the modding toolchain probes for a JetBrains Rider IDE. Two of
+`RiderPathLocator`'s Windows-path methods gate a filesystem access behind an existence check
+that **Wine lies about** (returns `true` for paths that don't exist — the same lie behind
+FIX 4/5/13):
+
+```csharp
+// GetToolboxRiderRootPath
+if (File.Exists(settingsJson)) { var s = File.ReadAllText(settingsJson); ... }   // throws
+// CollectPathsFromToolbox
+if (Directory.Exists(dir)) return Directory.GetDirectories(dir)...;               // throws
+else return new string[0];
+```
+
+Under a fresh CrossOver prefix (no JetBrains Toolbox) the guard passes on the lie and the
+read/enumeration throws `DirectoryNotFoundException`. `GetAllRiderPaths` **already** catches
+it (`try/catch(Exception)` → `Debug.LogException` → returns `Array.Empty<RiderInfo>()`), so
+the toolchain *result* is unchanged — but the mere act of **throwing during the probe** leaves
+the pause-menu UI unable to open. Proven by A/B test: creating the real `.settings.json` file
+**and** an empty `apps/` dir (so neither check throws) makes the menu work; removing them
+breaks it again. Both are needed because `GetToolboxRiderRootPath` throws first (site 1) and,
+once it can't, `CollectPathsFromToolbox` throws next (site 2).
+
+**Fix:** in each method, force the existence check to return `false` — the truth under Wine —
+so the probe skips the read/enumeration and returns its empty default with **no exception
+thrown**, exactly reproducing the working state. Implemented in `GamePatcher.cs`: locate the
+`call bool [File|Directory]::Exists(string)`, replace it in place with `pop` (drop the path
+arg the preceding `ldloc`/`ldarg` pushed) and insert `ldc.i4.0` after it; the following
+`brfalse`/`brtrue` then takes the "does not exist" branch. Stack stays balanced and branch
+targets are preserved; neither method has exception handlers.
+
+```il
+// GetToolboxRiderRootPath — before → after
+ldloc.1; call File::Exists; brfalse End      →   ldloc.1; pop; ldc.i4.0; brfalse End
+// CollectPathsFromToolbox
+ldarg.0; call Directory::Exists; brtrue Enum →   ldarg.0; pop; ldc.i4.0; brtrue Enum
+```
+
+Forcing "no IDE found" is correct and harmless under CrossOver — nobody runs JetBrains Rider
+inside a CS2 gaming bottle, and the base game already handles "no Rider" cleanly. This fix is
+part of **Lightweight** (and therefore Full), since the toolchain probe runs for everyone.
+
+---
+
 ## IL comparison: FIX 15 + FIX 16 verified against v1.5.8f1
 
 After applying both fixes, the patched methods produce identical IL to the reference working binary (verified with Mono.Cecil disassembly):

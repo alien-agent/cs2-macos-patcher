@@ -44,6 +44,7 @@ void Print(PatchSummary r)
 
 Print(ColossalIoPatcher.Patch(managedDir, dryRun: !apply));
 Print(AssetDatabasePatcher.Patch(managedDir, dryRun: !apply));
+Print(GamePatcher.Patch(managedDir, dryRun: !apply));
 if (fullMode)
     Print(PdxSdkPatcher.Patch(managedDir, dryRun: !apply));
 
