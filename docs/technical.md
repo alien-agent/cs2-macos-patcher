@@ -22,6 +22,7 @@ history. This document is the index.
 | Mod downloads freeze; all later downloads deadlock | `mod-downloads-freeze` | FIX 15, 16 | PDX.SDK.dll | [ModDownloadsFreeze.cs](../cs2patcher/Fixes/ModDownloadsFreeze.cs) |
 | Paradox Mods broken on a fresh install | `fresh-install-mod-scan` | FIX 17 | PDX.SDK.dll | [FreshInstallModScanFails.cs](../cs2patcher/Fixes/FreshInstallModScanFails.cs) |
 | Paradox Launcher window never opens (2026.8+) | — (patch.py) | — | — | [`ensure_launcher_render_fix` in patch.py](../patch.py) |
+| Paradox Launcher reports "exit code null" (CrossOver 26.2+) | — (patch.py) | — | — | [`ensure_launcher_path_fix` in patch.py](../patch.py) |
 
 The common thread: Wine lies. `File.Exists`/`GetFileAttributes` report true for missing
 files, failed operations report error code 0 ("Success"), `FindNextFile` reports failure
@@ -31,9 +32,9 @@ Burst SIMD height check. Each fix makes the code behave as it would on real Wind
 ## How the patcher works
 
 - **`patch.py`** is the guided front end: finds the game across CrossOver bottles, shows
-  patch status, runs a dry-run preview, then applies. It also applies the Paradox
-  Launcher fix to Steam's launch options (see `ensure_launcher_render_fix`, whose comment
-  header is its canonical doc).
+  patch status, runs a dry-run preview, then applies. It also applies Paradox Launcher
+  fixes to Steam's launch options and the bottle PATH (see `ensure_launcher_render_fix` and
+  `ensure_launcher_path_fix`, whose comment headers are their canonical docs).
 - **`cs2patcher`** (C#, Mono.Cecil) does the IL rewriting: `cs2patcher <managed-dir>
   [--apply]`. Without `--apply` it's a dry run that reports what would change. Every fix
   in `FixRegistry` runs; each DLL is read once and written once with all its fixes

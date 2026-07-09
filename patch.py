@@ -204,6 +204,83 @@ def run_patcher(dotnet, managed_dir, apply):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Launcher spawn fix (CrossOver 26.2+)
+# ──────────────────────────────────────────────────────────────────────────────
+
+CROSSOVER_WINE = "/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine"
+
+
+def _wine_reg(bottle, *args):
+    """Run `wine --bottle <bottle> reg <args>` and return the CompletedProcess."""
+    return subprocess.run(
+        [CROSSOVER_WINE, "--bottle", bottle, "--wait-children", "reg", *args],
+        capture_output=True, text=True, timeout=180)
+
+
+def _bottle_and_game_dir(managed_dir):
+    """For a CrossOver install, return (bottle_name, windows_game_dir) where
+    windows_game_dir is the game root ('C:\\...\\Cities Skylines II') as seen
+    inside the bottle. Returns (None, None) for non-CrossOver paths."""
+    game_root = os.path.dirname(os.path.dirname(os.path.abspath(managed_dir)))
+    parts = game_root.split(os.sep)
+    try:
+        i = parts.index("drive_c")
+    except ValueError:
+        return None, None
+    if i == 0 or "Bottles" not in parts[:i]:
+        return None, None
+    bottle = parts[i - 1]
+    win_path = "C:\\" + "\\".join(parts[i + 1:])
+    return bottle, win_path
+
+
+def _reg_query_user_path(bottle):
+    """Return the bottle's HKCU\\Environment PATH value, or '' if unset/unreadable."""
+    result = _wine_reg(bottle, "query", "HKCU\\Environment", "/v", "PATH")
+    for line in result.stdout.splitlines():
+        cols = line.split(None, 2)
+        if len(cols) == 3 and cols[0].upper() == "PATH" and cols[1].startswith("REG_"):
+            return cols[2].strip()
+    return ""
+
+
+def ensure_launcher_path_fix(managed_dir):
+    """Add the game directory to the bottle's user PATH.
+
+    CrossOver 26.2's Wine dropped the working directory from the executable
+    search that CreateProcess-by-name relies on (NeedCurrentDirectoryForExePath
+    now says no). The Paradox launcher spawns the game as a bare 'Cities2.exe'
+    with cwd set to the game directory, so on 26.2 every launch dies with
+    'spawn Cities2.exe ENOENT' ("exit code null" in the launcher UI). Putting
+    the game directory on PATH restores the lookup through the fallback the
+    launcher's Node runtime still performs. Idempotent; appends, never
+    replaces, an existing user PATH. Failures only warn — the DLL patch is
+    already applied and remains useful without this."""
+    bottle, game_dir = _bottle_and_game_dir(managed_dir)
+    if not bottle or not game_dir:
+        print(yellow("  SKIP  launcher PATH — not a CrossOver bottle, cannot apply"))
+        return
+    if not os.access(CROSSOVER_WINE, os.X_OK):
+        print(yellow("  SKIP  launcher PATH — CrossOver not found at /Applications"))
+        return
+    try:
+        current = _reg_query_user_path(bottle)
+        if game_dir.lower() in [p.strip().lower() for p in current.split(";") if p.strip()]:
+            print(f"  {green('OK')}    launcher PATH — game dir already present")
+            return
+        new_value = f"{current};{game_dir}" if current else game_dir
+        result = _wine_reg(bottle, "add", "HKCU\\Environment", "/v", "PATH",
+                           "/t", "REG_EXPAND_SZ", "/d", new_value, "/f")
+        if result.returncode == 0:
+            print(f"  {green('OK')}    launcher PATH — game dir added (restart Steam in the bottle)")
+        else:
+            print(yellow("  WARN  launcher PATH — reg add failed: "
+                         + (result.stderr.strip() or result.stdout.strip())))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(yellow(f"  WARN  launcher PATH — {e}"))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # UI helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -630,6 +707,8 @@ def main():
     record_patched(managed_dir)               # snapshot what we patched (see MANIFEST)
     print()
     ensure_launcher_render_fix(managed_dir)   # Paradox Launcher 2026.8+ window fix
+    print()
+    ensure_launcher_path_fix(managed_dir)     # CrossOver 26.2+ launcher spawn fix
     print()
     if ok:
         # Trust the result, not the patcher's report: a game update can change method
