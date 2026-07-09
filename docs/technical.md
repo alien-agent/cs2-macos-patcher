@@ -1,321 +1,74 @@
-# Technical Reference — CS2 macOS Patcher
+# Technical reference
 
-This document explains every Wine-specific bug patched by this tool, how they manifest, why they happen, and what the IL-level fix does.
+The **canonical documentation for every fix lives in its source file** under
+[`cs2patcher/Fixes/`](../cs2patcher/Fixes/) — each file is named for the player-visible
+problem it fixes, and its header comment carries the full story: symptom, root cause (the
+Wine behavior), the IL rewrite (before → after), the idempotency marker, and version
+history. This document is the index.
 
-All patches are applied to .NET assemblies using [Mono.Cecil](https://github.com/jbevain/cecil) — a library for reading and rewriting .NET IL bytecode without access to source code.
+## Fix index
 
----
+| Problem fixed | Slug (`CS2_SKIP`) | Was | DLL | Source |
+|---|---|---|---|---|
+| Game crashes immediately on launch | `game-launch-crash` | — | Colossal.IO.dll | [GameLaunchCrash.cs](../cs2patcher/Fixes/GameLaunchCrash.cs) |
+| "IOException: …Success" error dialog on missing files | `error-dialog-on-missing-files` | FIX 20 | Colossal.IO.dll | [ErrorDialogOnMissingFiles.cs](../cs2patcher/Fixes/ErrorDialogOnMissingFiles.cs) |
+| Mods fail to load (asset scan crash) | `mods-fail-to-load` | — | Colossal.IO.AssetDatabase.dll | [ModsFailToLoad.cs](../cs2patcher/Fixes/ModsFailToLoad.cs) |
+| Pause menu (Esc / gear) won't open | `pause-menu-wont-open` | FIX 18 | Game.dll | [PauseMenuWontOpen.cs](../cs2patcher/Fixes/PauseMenuWontOpen.cs) |
+| Elevated networks snap down onto structures below | `elevated-networks-snap` | FIX 19 | Game.dll | [ElevatedNetworksSnapToGround.cs](../cs2patcher/Fixes/ElevatedNetworksSnapToGround.cs) |
+| Phantom IO errors/crashes during mod file operations | `mod-io-errors` | FIX 1, 2, 8 | PDX.SDK.dll | [ModIoErrorsAndCrashes.cs](../cs2patcher/Fixes/ModIoErrorsAndCrashes.cs) |
+| Mod files/directories never get created | `mod-install-files-not-created` | FIX 3, 4, 5, 6, 13 | PDX.SDK.dll | [ModInstallFilesNotCreated.cs](../cs2patcher/Fixes/ModInstallFilesNotCreated.cs) |
+| Mod downloads abort instantly as "cancelled" | `mod-downloads-cancel` | FIX 7, 11, 12 | PDX.SDK.dll | [ModDownloadsCancelInstantly.cs](../cs2patcher/Fixes/ModDownloadsCancelInstantly.cs) |
+| Mod updates never re-download (stale state) | `mod-updates-never-redownload` | FIX 9, 10, 14 | PDX.SDK.dll | [ModUpdatesNeverRedownload.cs](../cs2patcher/Fixes/ModUpdatesNeverRedownload.cs) |
+| Mod downloads freeze; all later downloads deadlock | `mod-downloads-freeze` | FIX 15, 16 | PDX.SDK.dll | [ModDownloadsFreeze.cs](../cs2patcher/Fixes/ModDownloadsFreeze.cs) |
+| Paradox Mods broken on a fresh install | `fresh-install-mod-scan` | FIX 17 | PDX.SDK.dll | [FreshInstallModScanFails.cs](../cs2patcher/Fixes/FreshInstallModScanFails.cs) |
+| Paradox Launcher window never opens (2026.8+) | — (patch.py) | — | — | [`ensure_launcher_render_fix` in patch.py](../patch.py) |
 
-## Colossal.IO.dll — Game launch crash
+The common thread: Wine lies. `File.Exists`/`GetFileAttributes` report true for missing
+files, failed operations report error code 0 ("Success"), `FindNextFile` reports failure
+on success, Win32 waitable timers fire in milliseconds, and Rosetta 2 miscompiles one
+Burst SIMD height check. Each fix makes the code behave as it would on real Windows.
 
-### Bug: FindNextFile error check throws on valid results
+## How the patcher works
 
-**Symptom:** Game crashes immediately on launch before reaching the main menu.
+- **`patch.py`** is the guided front end: finds the game across CrossOver bottles, shows
+  patch status, runs a dry-run preview, then applies. It also applies the Paradox
+  Launcher fix to Steam's launch options (see `ensure_launcher_render_fix`, whose comment
+  header is its canonical doc).
+- **`cs2patcher`** (C#, Mono.Cecil) does the IL rewriting: `cs2patcher <managed-dir>
+  [--apply]`. Without `--apply` it's a dry run that reports what would change. Every fix
+  in `FixRegistry` runs; each DLL is read once and written once with all its fixes
+  applied to the same in-memory module (`DllPatcher`).
+- **Backups**: the first apply saves `<dll>.bak`. Each fix exposes a positive structural
+  marker of its own patch (`Fix.IsApplied`); when the on-disk DLL already carries any
+  marker, an incremental apply preserves the existing `.bak` instead of "refreshing" it —
+  the backup always holds the pristine original, never a previously-patched build. A DLL
+  with no markers (fresh game update) does refresh a stale `.bak`.
+- **Manifest** (`.cs2patch.json` in the Managed dir): records the sha256 of each DLL as
+  patched. Restore uses it to refuse downgrading a DLL the game has since updated;
+  status uses it to tell "our patch" from "a new game version".
+- **Idempotency**: re-running is always safe. Each fix's search pattern no longer matches
+  after it has been applied (`SKIP … already patched`), and re-applying after a game
+  update patches only what the update reverted.
 
-**Cause:** `Colossal.IO.LongDirectory` uses P/Invoke to call Win32 `FindNextFile`. On Wine, this function returns `false` (and sets `GetLastError()` to `ERROR_NO_MORE_FILES`) even when enumeration succeeded. The error-checking code unconditionally calls `GetExceptionFromWin32Error` and throws.
+## Debugging a game update
 
-**Fix:** NOP the block `GetLastWin32Error → GetExceptionFromWin32Error → throw` in all `LongDirectory` state machine `MoveNext` methods. The return value from `FindNextFile` is ignored; the game continues normally.
+When a new game version misbehaves under the patch, bisect by skipping fixes:
 
----
-
-## Colossal.IO.AssetDatabase.dll — Asset loading crash
-
-### Bug: File.Exists returns true for non-existent files
-
-**Symptom:** Mods fail to load. Log shows "Failed to add Mod" or similar asset errors.
-
-**Root cause:** Wine's `GetFileAttributesW` (called by .NET `File.Exists`) returns `S_OK` (success) instead of `ERROR_FILE_NOT_FOUND` when the file doesn't exist but its parent directory does. So `File.Exists(".priority")` returns `true` even when no `.priority` file was created.
-
-**Effect:** `FileSystemDataSource.PopulateFromDirectory` checks for a `.priority` file to sort mods. Finding it "exists", it calls `File.ReadAllLines(".priority")` which throws `FileNotFoundException`.
-
-**Fix:** In `PopulateFromDirectory`, NOP the `ldstr ".priority"` + `call File::Exists` instructions and change `brfalse` to unconditional `br` — always skipping the `.priority` block.
-
----
-
-## PDX.SDK.dll — Paradox Mods downloads
-
-`PDX.SDK.dll` is the Paradox mod download SDK. It contains 17 Wine-specific bugs addressed by this patcher. The root-cause fixes are FIX 15 (download freeze), FIX 16 (subsequent-download deadlock), and FIX 17 (fresh-install IOException). FIX 7 and FIX 12 also include a fallback path that triggers an `InvalidProgramException` if not handled correctly.
-
-### FIX 1–4: P/Invoke error checks and PathExists lies (DiskIODefaultWindows)
-
-`DiskIODefaultWindows` wraps Win32 file operations. Under Wine:
-- `DeleteLongPathFile`, `DeleteLongPathDirectory`, `CreateLongPathDirectory`, `LongPathMove` throw `IOException` even when the operation succeeded — NOP'd.
-- Short-path equivalents (`Delete`, `DeleteDirectory`, `CreateDirectory`, `Move`) receive spurious `IOException`s from the BCL — wrapped in try-catch that swallows them.
-- `CreateLongPathDirectory` and `CreateDirectory` call `PathExists` before creating, which returns `true` for non-existent paths under Wine — the early-exit branch is NOP'd.
-
-### FIX 5: CreateWriteStream — always create parent directory
-
-`FileIO.CreateWriteStream` checks `PathExists` before creating the parent directory. Wine lies — NOP'd; the directory is always created.
-
-### FIX 6: GetLongPath — slash direction
-
-`DiskIODefaultWindows.GetLongPath` calls `Replace('/', DirectorySeparatorChar)` — on Wine the separator is `\` (`92`) but the literal `47` (`/`) stays in both calls. Changed both `ldc.i4.s 47` to `ldc.i4.s 92`.
-
-### FIX 7: CancellationToken checks — broad safety net
-
-Every `get_IsCancellationRequested` call in the DLL is replaced with `ldc.i4.0` (always `false`). This prevents any download operation from being cancelled by a spuriously-cancelled token. **Note:** FIX 15 is the targeted root-cause fix; FIX 7 is a belt-and-suspenders safety net for older versions.
-
-**Wholesale-replace fallback (added after a `get_IsPaused` regression):** the surgical NOP approach fails when the instruction preceding `call get_IsCancellationRequested` is itself a `ret` from an earlier branch. `ModsDownloadProgressController.get_IsPaused` has exactly this shape:
-```il
-ldarg.0; ldfld tokenSource; dup; brtrue.s Exists
-pop; ldc.i4.0; ret                 ← null branch returns false here
-Exists:
-call CancellationTokenSource::get_IsCancellationRequested   ← FIX 7 target
-ret
-```
-The "else" branch of FIX 7 (when `prev` isn't `ldflda`) NOPs `il[i-1]`, which here is the early-return `ret`. Execution then falls through into our `ldc.i4.0` push, leaving the stack imbalanced at the final `ret`. Mono's verifier rejects the resulting body with `InvalidProgramException: Invalid IL code in ... get_IsPaused (): IL_000d: ret`.
-
-When the patcher detects `prev.OpCode == Ret` on a `bool`-returning method, it replaces the entire method body with `ldc.i4.0; ret` instead of attempting surgical patching. Same fallback is wired into FIX 12.
-
-### FIX 8: CreateLongPathFileStream — invalid handle IOException
-
-`CreateLongPathFileStream` throws `IOException` on invalid handle even when Wine returned a valid handle. NOP'd.
-
-### FIX 9: DownloadFilesInManifest — always re-download
-
-In `RemoteRepository.<DownloadFilesInManifest>d__N.MoveNext`, the `FileAlreadyDownloaded` result (`bool`) is popped and replaced with an unconditional branch to the download path. Belt-and-suspenders for versions where FIX 14/16 pattern matching fails.
-
-### FIX 10: InstallToFolder — GetInstalledVersion error bypass
-
-`Executor.<InstallToFolder>d__13.MoveNext` calls `GetInstalledVersion` which returns an error result under Wine. The `get_Success` check and error-return block are NOP'd so installation proceeds unconditionally.
-
-### FIX 11: TaskCanceledException — treat as regular I/O error
-
-`ResultFactory.CreateFileIoResultFromException` has a special branch for `TaskCanceledException` that propagates cancellation state up the call stack. Under Wine, cancellations are spurious, not real user intent. The `isinst TaskCanceledException` + `brfalse` pattern is changed to always branch past the special handling.
-
-### FIX 12: IsCancelledOperation — force false
-
-`IsCancelledOperation` extension method checks are replaced with `ldc.i4.0` (always `false`) across all types in the DLL, preventing spurious cancellation propagation.
-
-### FIX 13: PerformDownload PathExists — always create new file
-
-`FileDownloader.<PerformDownload>d__N.MoveNext` calls `PathExists` to decide whether to append to an existing download or create a new file. Wine returns `true` for the non-existent `.downloading/*.zip` file, so the code tries to append to nothing. NOP the PathExists block and branch unconditionally to the "create new file" path.
-
-### FIX 14: FileAlreadyDownloaded — always return false
-
-`RemoteRepository.FileAlreadyDownloaded` body is replaced with:
-```il
-ldc.i4.0
-call Task::FromResult<bool>
-ret
-```
-This prevents `CheckIntegrity` from ever running, which would otherwise acquire a reader lock on the non-existent download file and leak it (see FIX 16). Kept for older SDK versions; superseded by FIX 16 on v1.5.8f1+.
-
----
-
-### FIX 15: GetLockToken — premature Win32 timer cancellation (root cause, v1.5.8f1)
-
-**Symptom:** Downloads start but freeze at 0% with no progress. `AcquireWriterLock` is never entered.
-
-**Root cause:** `FileIO.GetLockToken` creates a `CancellationTokenSource` with a 10-second timeout:
-```csharp
-var cts = CancellationTokenSource.CreateLinkedTokenSource(
-    cancellationToken,
-    new CancellationTokenSource(TimeSpan.FromSeconds(10)).Token);
-return cts.Token;
-```
-`CancellationTokenSource(TimeSpan)` uses a Win32 waitable timer internally. Under Wine on macOS, this timer fires in **milliseconds**, not 10 seconds. Every call to `AcquireWriterLock` receives a token that is already cancelled before the semaphore can be acquired.
-
-**Fix:** Replace the entire method body with:
-```il
-ldarg.1    // push cancellationToken parameter
-ret        // return it unchanged
-```
-The outer download cancellation token is still passed through normally — user-initiated cancels work. Only the spurious 10-second timer is removed.
-
----
-
-### FIX 16: CreateFileStream lock leak — reader lock not disposed on FileNotFoundException (root cause, v1.5.8f1)
-
-**Symptom:** First download may succeed, but all subsequent downloads hang forever. Exact same symptom as FIX 15 if both are active, so FIX 15 must be applied first to observe FIX 16's failure mode in isolation.
-
-**Root cause:**
-
-Before each download, `FileIntegrityVerifier.CheckIntegrity` calls `FileIO.CreateFileStream` (read mode) to verify the file's integrity. The state machine `FileIO.<CreateFileStream>d__25.MoveNext` works like this:
-
-```
-1. Call FileLocks.FetchLock(path)          → gets AsyncReaderWriterLock for this path
-2. Call lock.AcquireReaderLock(token)      → acquires reader lock (_readSemaphore.Wait)
-3. Store result in local V_5 (AcquireLockResult)
-4. Call DiskIO.PathExists(path)            → returns TRUE (Wine lies)
-5. Open file for reading                   → throws FileNotFoundException (file doesn't exist)
-6. [IOException catch block]
-7.   Call ResultFactory.CreateIoResultFromException(ex)
-8.   stloc.2  (store error result)
-9.   *** leave.s IL_01f6  ← exits WITHOUT calling V_5.Dispose() ***
+```bash
+CS2_SKIP="fresh-install-mod-scan,elevated-networks-snap" ./patch.py
 ```
 
-`AcquireLockResult.Dispose()` calls the release action (`ReleaseReaderLock`), which releases `_readSemaphore`. Without it, `_readSemaphore` stays at `0`. When the downloader then calls `FileIO.CreateWriteStream` for the same path, `AcquireWriterLock` calls `_readSemaphore.WaitAsync()` — which blocks forever because no one will ever release it.
+`CS2_SKIP` takes comma-separated slugs from the index above and disables those fixes for
+the run (this is how the v1.6.0f1 hang was traced to the mod-scan wrap — see the
+HISTORY note in FreshInstallModScanFails.cs). `CS2_NETSNAP_EXTRA="Full.Type.Name,…"`
+wraps additional systems in the snap fix without recompiling, the escalation path if a
+game update moves the snap math into a different system.
 
-`AsyncReaderWriterLock` is per-path: `FileLocks` uses `ConcurrentDictionary<string, AsyncReaderWriterLock>`. So only downloads for the same file path block each other; different mods download independently until they happen to retry the same path.
+## Verifying a change to the patcher
 
-**Fix:** Insert before every `leave`/`leave.s` in the `IOException` catch block:
-```il
-ldloc.s V_5                              // push AcquireLockResult
-callvirt AcquireLockResult::Dispose()    // release reader lock
-```
-`AcquireLockResult.Dispose()` is null-safe (checks `_releaseAction != null`) so calling it on a failed/unacquired lock is safe.
-
-**Why this is cleaner than FIX 14:** FIX 14 prevents the code path from running at all (by always returning `false` from `FileAlreadyDownloaded`), which means the file is re-downloaded on every game launch even if it was already downloaded. FIX 16 fixes the actual bug so the integrity check can run normally.
-
----
-
-### FIX 17: ListFiles / ListDirectories / ListFilesRecursive — IOException: Success on fresh install
-
-**Symptom:** Downloads fail immediately at ~2% with "Preparing", UI shows "Failed". Only reproducible on a clean profile — users who already have the per-mod `.downloading/<modId>/` folders from previous attempts don't see it.
-
-**Log evidence:**
-```
-[ERROR] [P06:04][ModsPatching.PrepareFolderForPatching][PerformDiskOperationAndCatch]
-System.IO.IOException: Success : 'C:\users\crossover\AppData\LocalLow\Colossal Order\
-  Cities Skylines II\.cache\Mods\pdx_mods\.downloading\143483_1'
-  at System.IO.Enumeration.FileSystemEnumerator`1[TResult].CreateDirectoryHandle (...)
-  at PDX.SDK.Internal.Util.IO.DiskIODefaultWindows.ListFiles (System.String path)
-```
-
-**Root cause:** `DiskIODefaultWindows.ListFiles` (and `ListDirectories`, `ListFilesRecursive`) is defined as:
-```csharp
-public List<string> ListFiles(string path) {
-    if (!PathExists(path)) return new List<string>();
-    if (IsLongPath(path)) return GetLongPathFiles(path);
-    return Directory.GetFiles(path).ToList();
-}
-```
-The `!PathExists` guard is meant to handle missing directories — but Wine's `PathExists` lies (returns `true` for non-existent paths, see FIX 4/5/13), so execution always falls through. When the actual `Directory.GetFiles(path)` is called on a non-existent directory, Wine's `GetFileAttributes` returns success with an invalid handle, and the .NET `FileSystemEnumerator` constructor throws `IOException` with the system error message for error code 0 (`"Success"`).
-
-**Fix:** Wrap each method's entire body in `try { ... } catch (IOException) { return new List<string>(); }`. Implementation rewrites the IL in place:
-1. Add a local variable `V_0` of the method's return type (`List<string>`).
-2. Mutate every existing `ret` to `stloc V_0; leave End` (mutated in place — preserves branch target references).
-3. Append the catch handler: `pop; newobj List<string>::.ctor(); stloc V_0; leave End`.
-4. Append the join point: `End: ldloc V_0; ret`.
-5. Register an `ExceptionHandler(Catch IOException)` covering `[firstInstr..catchPop)`.
-
-The `newobj List<string>::.ctor()` reference is reused from the original method body — the `!PathExists` early-return uses exactly that constructor, so we don't need to import a new method reference.
-
-Result for `ListFiles`:
-```il
-.try {
-    ldarg.0; ldarg.1; callvirt PathExists
-    brtrue.s Exists
-    newobj List<string>::.ctor()
-    stloc V_0; leave End
-
-  Exists:
-    ldarg.0; ldarg.1; call IsLongPath
-    brtrue.s LongPath
-    ldarg.1; call Directory::GetFiles
-    call Enumerable::ToList
-    stloc V_0; leave End
-
-  LongPath:
-    ldarg.0; ldarg.1; call GetLongPathFiles
-    stloc V_0; leave End
-}
-.catch IOException {
-    pop
-    newobj List<string>::.ctor()
-    stloc V_0; leave End
-}
-End:
-    ldloc V_0
-    ret
-```
-
-Why we keep the (useless) `PathExists` check: it costs nothing on Wine (always falls through) and remains correct on Windows where `PathExists` returns the real answer.
-
-**v1.6.0f1 update — `ListFilesRecursive` is excluded by default.** On game v1.6.0f1, applying
-this wrap to `ListFilesRecursive` **hangs the game at the Paradox logo** (SDK init). The
-init-time recursive mod scan calls `ListFilesRecursive`; when the wrap makes it return an empty
-list instead of throwing, the SDK reads that as "success + empty" and loops instead of breaking
-out on the error, so the process never reaches the menu. Confirmed by bisection: patching only
-`ListFiles` + `ListDirectories` boots *and* downloads mods correctly; adding `ListFilesRecursive`
-reintroduces the hang. The download path (`PrepareFolderForPatching` → `ClearFolderAndKeepPatchFile`)
-only needs `ListFiles`/`ListDirectories`, so `ListFilesRecursive` is left unpatched — it throws
-`IOException: Success`, which `FileIO.PerformDiskOperationAndCatch` already handles. The bisection
-tooling is `CS2_PDX_SKIP="7,12,17,…"` in `PdxSdkPatcher`, which skips any FIX number.
-
----
-
-### FIX 18: RiderPathLocator — in-game pause menu (Esc / gear) won't open on Wine
-
-**Target:** `Game.dll` (a new patch target — the modding toolchain lives here, not in
-`Colossal.IO`/`PDX.SDK`).
-
-**Symptom:** In-game, the **pause menu does not open** — neither **Esc** nor the **gear
-icon** shows the popup. Everything else works: gameplay, autosave, mods, and the **Tab/Home
-developer menu open fine** (so overlays render — it is not a CrossOver fullscreen issue).
-With `-uiDeveloperMode`, pressing Esc/gear produces **no JS error and no cohtml activity** —
-the menu simply never mounts.
-
-**Log evidence:**
-```
-DirectoryNotFoundException: Could not find a part of the path
-  "C:\users\crossover\AppData\Local\JetBrains\Toolbox\.settings.json"
-  at System.IO.File.ReadAllText(...)
-  at ...RiderPathLocator.GetToolboxRiderRootPath(String) / GetToolboxBaseDir()
-  / CollectRiderInfosWindows() / GetAllRiderPaths()
-  ... RiderDependency.GetIDEVersion → ToolchainDependencyManager.GetDeploymentState
-```
-
-**Root cause:** On game load the modding toolchain probes for a JetBrains Rider IDE. Two of
-`RiderPathLocator`'s Windows-path methods gate a filesystem access behind an existence check
-that **Wine lies about** (returns `true` for paths that don't exist — the same lie behind
-FIX 4/5/13):
-
-```csharp
-// GetToolboxRiderRootPath
-if (File.Exists(settingsJson)) { var s = File.ReadAllText(settingsJson); ... }   // throws
-// CollectPathsFromToolbox
-if (Directory.Exists(dir)) return Directory.GetDirectories(dir)...;               // throws
-else return new string[0];
-```
-
-Under a fresh CrossOver prefix (no JetBrains Toolbox) the guard passes on the lie and the
-read/enumeration throws `DirectoryNotFoundException`. `GetAllRiderPaths` **already** catches
-it (`try/catch(Exception)` → `Debug.LogException` → returns `Array.Empty<RiderInfo>()`), so
-the toolchain *result* is unchanged — but the mere act of **throwing during the probe** leaves
-the pause-menu UI unable to open. Proven by A/B test: creating the real `.settings.json` file
-**and** an empty `apps/` dir (so neither check throws) makes the menu work; removing them
-breaks it again. Both are needed because `GetToolboxRiderRootPath` throws first (site 1) and,
-once it can't, `CollectPathsFromToolbox` throws next (site 2).
-
-**Fix:** in each method, force the existence check to return `false` — the truth under Wine —
-so the probe skips the read/enumeration and returns its empty default with **no exception
-thrown**, exactly reproducing the working state. Implemented in `GamePatcher.cs`: locate the
-`call bool [File|Directory]::Exists(string)`, replace it in place with `pop` (drop the path
-arg the preceding `ldloc`/`ldarg` pushed) and insert `ldc.i4.0` after it; the following
-`brfalse`/`brtrue` then takes the "does not exist" branch. Stack stays balanced and branch
-targets are preserved; neither method has exception handlers.
-
-```il
-// GetToolboxRiderRootPath — before → after
-ldloc.1; call File::Exists; brfalse End      →   ldloc.1; pop; ldc.i4.0; brfalse End
-// CollectPathsFromToolbox
-ldarg.0; call Directory::Exists; brtrue Enum →   ldarg.0; pop; ldc.i4.0; brtrue Enum
-```
-
-Forcing "no IDE found" is correct and harmless under CrossOver — nobody runs JetBrains Rider
-inside a CS2 gaming bottle, and the base game already handles "no Rider" cleanly. This fix is
-part of **Lightweight** (and therefore Full), since the toolchain probe runs for everyone.
-
----
-
-## IL comparison: FIX 15 + FIX 16 verified against v1.5.8f1
-
-After applying both fixes, the patched methods produce identical IL to the reference working binary (verified with Mono.Cecil disassembly):
-
-**GetLockToken:**
-```il
-ldarg.1
-ret
-```
-
-**CreateFileStream IOException catch (final instructions):**
-```il
-...
-call   ResultFactory::CreateIoResultFromException
-stloc.2
-ldloc.s V_5                              ← FIX 16 inserted
-callvirt AcquireLockResult::Dispose()    ← FIX 16 inserted
-leave.s IL_01f6
-```
+The behavior-parity harness used for the file-per-fix refactor, reusable for any patcher
+change: (1) dry-run against a live already-patched install must report all `SKIP`;
+(2) apply to pristine copies must reproduce the expected per-DLL fix counts (currently
+3 / 1 / 5 / 34) and be idempotent on re-run; (3) `ilverify` against the Managed dir must
+produce an error set identical to the pre-change output (Unity codegen noise only — any
+new entry is a regression); (4) Restore must return byte-identical pristine DLLs.

@@ -4,10 +4,11 @@ Fixes crashes and enables Paradox Mods for **Cities: Skylines 2** running under 
 
 Tested: **CrossOver 26 · Game v1.5.8f1–v1.6.0f1 · Apple Silicon (M3 Pro → M5 Max)**
 
-> **Elevated networks snapping to the ground?** That's a *separate* Apple Silicon bug (Rosetta
-> miscompiles Unity's Burst SIMD code and drops the height value), so raised roads, bridges and pipes
-> wrongly snap down onto whatever is below them. Fix it with
-> **[icetear/cs2-net-snap-fix](https://github.com/icetear/cs2-net-snap-fix)** — re-apply after each game update.
+> **Elevated networks snapping to the ground?** An Apple Silicon bug (Rosetta miscompiles Unity's
+> Burst SIMD code and drops the height value) makes raised roads, bridges and pipes wrongly snap
+> down onto whatever is below them. **This patcher fixes it** — without the FPS regression
+> of the standalone [icetear/cs2-net-snap-fix](https://github.com/icetear/cs2-net-snap-fix) patch
+> (see [docs/technical.md](docs/technical.md)).
 
 ---
 
@@ -22,10 +23,9 @@ git clone https://github.com/alien-agent/cs2-macos-patcher && cd cs2-macos-patch
 `patch.py` is a single **guided, interactive** tool. It walks you through:
 
 1. **Finds your game** automatically across all CrossOver bottles, and shows whether it's already patched
-2. Lets you pick **Lightweight** or **Full**
-3. **Previews the change first** (a dry-run that writes nothing), then asks you to confirm
-4. **Applies** the patches and backs up the originals to `*.bak`
-5. Installs dotnet via Homebrew automatically if needed
+2. **Previews the change first** (a dry-run that writes nothing), then asks you to confirm
+3. **Applies all fixes** — launch, assets, pause menu, network snapping, Paradox Mods — and backs up the originals to `*.bak`
+4. Installs dotnet via Homebrew automatically if needed
 
 > **No dotnet?** No problem — the patcher installs it for you. You only
 > need [Homebrew](https://brew.sh).
@@ -35,7 +35,7 @@ git clone https://github.com/alien-agent/cs2-macos-patcher && cd cs2-macos-patch
 
 ### After a game update
 
-Re-run `./patch.py` and pick your patch mode again. The preview and the patcher both detect
+Re-run `./patch.py` and Patch again. The preview and the patcher both detect
 already-patched files and skip them, then apply any new fixes to updated DLLs — it's always safe to
 re-run.
 
@@ -64,8 +64,8 @@ Prefer to do it by hand? The backups are plain copies:
 cd "<path-to>/Cities2_Data/Managed"
 cp Colossal.IO.dll.bak Colossal.IO.dll
 cp Colossal.IO.AssetDatabase.dll.bak Colossal.IO.AssetDatabase.dll
-cp Game.dll.bak Game.dll                # fixes the in-game pause menu (Esc / gear)
-cp PDX.SDK.dll.bak PDX.SDK.dll          # Full patch only
+cp Game.dll.bak Game.dll
+cp PDX.SDK.dll.bak PDX.SDK.dll
 ```
 
 ---
@@ -133,9 +133,26 @@ Mods patches.
 - **In-game pause menu fix (`Game.dll`).** The modding toolchain's Rider-IDE probe throws on
   Wine's lying `File.Exists`/`Directory.Exists` during load; that thrown exception leaves the
   **Esc / gear pause menu unable to open**. Forcing the two existence checks to `false` (the
-  truth under Wine) stops the throw and the menu works. Part of Lightweight.
+  truth under Wine) stops the throw and the menu works.
+- **Elevated-network snap fix (`Game.dll`).** On Apple Silicon, Rosetta breaks the Burst SIMD
+  height check, so bridges/power lines/pipes snap down onto structures below. The fix runs the
+  net tool's snap jobs on the (correct) managed path **only while the tool is active** — no
+  global Burst toggle, zero cost when the tool is closed. Same root-cause insight as
+  [icetear/cs2-net-snap-fix](https://github.com/icetear/cs2-net-snap-fix), without its
+  reported performance regression.
+- **Spurious `IOException: …Success` dialog fix (`Colossal.IO.dll`).** Wine reports a failed
+  file open with error code `0` ("Success") instead of "file not found", so reading an absent
+  settings file (e.g. `Benchmark.coc`) pops an in-game error overlay instead of being handled
+  silently. The fix remaps Wine's error-code-0 to file-not-found so the game's existing
+  handler swallows it.
+- **Paradox Launcher 2026.8+ fix.** The launcher self-updates silently and the new version's
+  Chromium can't create any GPU context under Wine — the launcher window never opens and the
+  game "won't start". `patch.py` automatically adds SwiftShader (software-rendering) flags to
+  CS2's Steam launch options, fixing the launcher without touching Paradox files. (Run
+  `./patch.py` with Steam closed for this step to apply.)
 - **Single guided command** — `./patch.py` handles everything: a dry-run **preview before
   applying**, in-menu **restore**, and automatic dotnet installation.
 - **Auto-detection** of game across all CrossOver bottles.
-- **Lightweight / Full split** — game-launch fixes require no extra dependencies; Paradox Mods patch
-  installs dotnet automatically if needed.
+- **Every fix documented in its source file** — each patch lives in
+  [`cs2patcher/Fixes/`](cs2patcher/Fixes/) in a file named for the problem it fixes, with the
+  full root-cause writeup in its header; [docs/technical.md](docs/technical.md) is the index.
