@@ -145,9 +145,11 @@ sealed class ElevatedNetworksSnapToGround : Fix
             return;
 
         // Resolve the members we inject calls to. Unity.Burst / Unity.Entities live next
-        // to Game.dll in the Managed dir, so the resolver returns the real assemblies (its
-        // empty-stub fallback only triggers for genuinely absent ones — then First() throws
-        // and we skip: better no fix than a broken reference).
+        // to Game.dll in the Managed dir, so the resolver returns the real assemblies. If
+        // one is absent/reshaped, First() throws — and TypeReference.Resolve() returns
+        // null when the resolver handed back an empty stub (the fallback for genuinely
+        // absent assemblies), so that path is null-checked explicitly. Either way we
+        // skip: better no fix than a broken reference.
         FieldReference optionsField;
         MethodReference getEnable, setEnable, jhComplete, getDependency = null!;
         TypeReference jobHandleRef;
@@ -170,13 +172,17 @@ sealed class ElevatedNetworksSnapToGround : Fix
                 var getDepDef = sysBase.Methods.First(m => m.Name == "get_Dependency" && m.Parameters.Count == 0);
                 getDependency = module.ImportReference(getDepDef);
                 jobHandleRef = module.ImportReference(getDepDef.ReturnType);
-                jhComplete = module.ImportReference(getDepDef.ReturnType.Resolve().Methods
+                var jobHandleDef = getDepDef.ReturnType.Resolve();
+                if (jobHandleDef == null) return;           // JobHandle's assembly is a stub
+                jhComplete = module.ImportReference(jobHandleDef.Methods
                     .First(m => m.Name == "Complete" && m.Parameters.Count == 0));
             }
             else
             {
                 jobHandleRef = onUpdate.ReturnType;         // Unity.Jobs.JobHandle
-                jhComplete = module.ImportReference(jobHandleRef.Resolve().Methods
+                var jobHandleDef = jobHandleRef.Resolve();
+                if (jobHandleDef == null) return;           // JobHandle's assembly is a stub
+                jhComplete = module.ImportReference(jobHandleDef.Methods
                     .First(m => m.Name == "Complete" && m.Parameters.Count == 0));
             }
         }

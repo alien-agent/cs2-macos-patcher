@@ -317,9 +317,10 @@ CS2_APP_ID = "949230"
 
 def _vdf_find_block(text, name, start=0):
     """Return (open_idx, close_idx) of the { } block following "name" after start,
-    or None. Walks the braces quote-aware so braces inside quoted values can't
+    or None. Key match is case-insensitive (VDF keys are; real files mix "apps"/
+    "Apps"). Walks the braces quote-aware so braces inside quoted values can't
     unbalance the scan."""
-    m = re.compile(r'"%s"\s*\{' % re.escape(name)).search(text, start)
+    m = re.compile(r'"%s"\s*\{' % re.escape(name), re.IGNORECASE).search(text, start)
     if not m:
         return None
     i = m.end() - 1                     # index of the opening '{'
@@ -365,7 +366,9 @@ def ensure_launcher_render_fix(managed_dir):
         steam_root = os.path.normpath(os.path.join(managed_dir, *[".."] * 5))
         vdfs = glob.glob(os.path.join(steam_root, "userdata", "*", "config", "localconfig.vdf"))
         if not vdfs:
-            print(yellow("  ⚠ No Steam userdata found — is this a Steam install?"))
+            print(yellow("  ⚠ No Steam userdata found next to this install (game in a"))
+            print(yellow("    secondary Steam library?) — set Launch Options manually in"))
+            print(yellow(f"    Steam → CS2 → Properties: %command% {LAUNCHER_RENDER_FLAGS}"))
             return False
 
         changed_any = False
@@ -376,19 +379,29 @@ def ensure_launcher_render_fix(managed_dir):
 
             # The app's config block lives at Software/Valve/Steam/apps/949230; the
             # bare string '"949230"  "<hex>"' elsewhere is an app ticket, so anchor
-            # on the "apps" OBJECT and search only inside it.
+            # on an "apps" OBJECT and search only inside it. Other sections can carry
+            # a same-named key, so scan every "apps" block until one holds the app.
             apps = _vdf_find_block(text, "apps")
             if not apps:
                 print(yellow(f"  ⚠ account {account}: no apps section, skipped"))
                 continue
-            app = _vdf_find_block(text[apps[0]:apps[1]], CS2_APP_ID)
-            if not app:
+            app_span = None
+            while apps:
+                app = _vdf_find_block(text[apps[0]:apps[1]], CS2_APP_ID)
+                if app:
+                    app_span = (apps[0] + app[0], apps[0] + app[1])
+                    break
+                apps = _vdf_find_block(text, "apps", apps[1] + 1)
+            if not app_span:
                 print(yellow(f"  ⚠ account {account}: CS2 ({CS2_APP_ID}) not configured, skipped"))
                 continue
-            a_open, a_close = apps[0] + app[0], apps[0] + app[1]
+            a_open, a_close = app_span
 
             block = text[a_open:a_close]
-            m = re.search(r'("LaunchOptions"\s*")([^"]*)(")', block)
+            # Value match must skip escaped characters (\" inside the value) — same
+            # rule the brace walker above follows — or a quote inside the user's
+            # options would truncate the match and corrupt the rewrite.
+            m = re.search(r'("LaunchOptions"\s*")((?:\\.|[^"\\])*)(")', block, re.IGNORECASE)
             if m and LAUNCHER_RENDER_FLAGS in m.group(2):
                 print(green(f"  ✓ account {account}: launch options already set"))
                 continue
