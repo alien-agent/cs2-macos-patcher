@@ -15,17 +15,16 @@ import tty
 import select
 import hashlib
 import json
+import re
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PATCHER_PROJECT = os.path.join(SCRIPT_DIR, "cs2patcher")
 
-# Which DLLs each mode patches (full = lightweight + PDX.SDK). The C# patcher is the
-# real authority; this mirror lets patch.py report status without invoking dotnet.
-MODE_DLLS = {
-    "lightweight": ["Colossal.IO.dll", "Colossal.IO.AssetDatabase.dll"],
-    "full":        ["Colossal.IO.dll", "Colossal.IO.AssetDatabase.dll", "PDX.SDK.dll"],
-}
-DLLS = MODE_DLLS["full"]
+# The DLLs the patcher targets. The C# patcher (FixRegistry) is the real authority;
+# this mirror lets patch.py report status without invoking dotnet. There is one Patch
+# action that applies everything — every fix repairs Wine breakage without touching
+# gameplay, security or achievements, so a partial patch has no use.
+DLLS = ["Colossal.IO.dll", "Colossal.IO.AssetDatabase.dll", "Game.dll", "PDX.SDK.dll"]
 
 # Records the sha256 of each DLL as we patched it. A later game update replaces the
 # DLL out from under its (now stale) .bak; without this record a plain byte-compare
@@ -162,14 +161,13 @@ def ensure_dotnet():
 # C# patcher runner
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run_patcher(dotnet, managed_dir, mode, apply):
+def run_patcher(dotnet, managed_dir, apply):
     """Run the C# patcher, print results, return True if all ok."""
     cmd = [
         dotnet, "run",
         "--project", PATCHER_PROJECT,
         "--",
         managed_dir,
-        mode,
     ]
     if apply:
         cmd.append("--apply")
@@ -259,12 +257,12 @@ def dll_state(managed_dir, dll):
     return "original"
 
 
-def record_patched(managed_dir, mode):
-    """After an apply, record the sha of each DLL the mode actually patched (differs
-    from its .bak); drop entries for targets left unpatched. Lets status/restore tell
-    our patch apart from a later game update."""
+def record_patched(managed_dir):
+    """After an apply, record the sha of each DLL actually patched (differs from its
+    .bak); drop entries for targets left unpatched. Lets status/restore tell our patch
+    apart from a later game update."""
     manifest = load_manifest(managed_dir)
-    for dll in MODE_DLLS[mode]:
+    for dll in DLLS:
         path = os.path.join(managed_dir, dll)
         bak = path + ".bak"
         if (os.path.isfile(path) and os.path.isfile(bak)
@@ -297,6 +295,145 @@ def restore_dlls(managed_dir):
     if restored == 0:
         print(yellow("  No backups found — nothing to restore."))
     return restored
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Paradox Launcher render fix (SwiftShader) — Steam launch options
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Paradox Launcher v2.2026.8+ (self-updates silently mid-session) cannot create ANY
+# GPU context under Wine: D3D11 fails, software D3D (WARP) fails, every EGL path
+# fails, so its window never paints and it gives up after ~10 s — the game "won't
+# launch" even though nothing else changed. Chromium ships a pure-CPU renderer
+# (SwiftShader, vk_swiftshader.dll) that works fine under Wine, but never falls back
+# to it on its own; it must be requested on the command line. Steam's per-app Launch
+# Options are forwarded verbatim through the whole chain (dowser.exe → bootstrapper
+# → Paradox Launcher; the launcher passes the extras on to Cities2.exe, which
+# ignores unknown args), so writing them there fixes the launcher for good — no
+# Paradox files touched, survives launcher self-updates.
+LAUNCHER_RENDER_FLAGS = "--use-angle=swiftshader --enable-unsafe-swiftshader"
+CS2_APP_ID = "949230"
+
+
+def _vdf_find_block(text, name, start=0):
+    """Return (open_idx, close_idx) of the { } block following "name" after start,
+    or None. Key match is case-insensitive (VDF keys are; real files mix "apps"/
+    "Apps"). Walks the braces quote-aware so braces inside quoted values can't
+    unbalance the scan."""
+    m = re.compile(r'"%s"\s*\{' % re.escape(name), re.IGNORECASE).search(text, start)
+    if not m:
+        return None
+    i = m.end() - 1                     # index of the opening '{'
+    depth, in_quote, escaped = 0, False, False
+    for j in range(i, len(text)):
+        ch = text[j]
+        if escaped:
+            escaped = False
+        elif ch == "\\" and in_quote:
+            escaped = True
+        elif ch == '"':
+            in_quote = not in_quote
+        elif not in_quote:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return (i, j)
+    return None
+
+
+def _steam_running():
+    out = subprocess.run(["pgrep", "-fl", "steam.exe"],
+                         capture_output=True, text=True).stdout
+    return any("steam.exe" in line for line in out.splitlines())
+
+
+def ensure_launcher_render_fix(managed_dir):
+    """Add the SwiftShader flags to CS2's Steam launch options in every Steam user's
+    localconfig.vdf inside the bottle. Idempotent; preserves options the user already
+    set; backs the file up once; warn-only on failure. Steam rewrites localconfig.vdf
+    from memory on exit, so the edit only sticks while Steam is closed — if Steam is
+    running we skip and say so rather than write an edit that would be lost."""
+    print("Ensuring Paradox Launcher render fix (SwiftShader launch options)...")
+    try:
+        if _steam_running():
+            print(yellow("  ⚠ Steam is running — close Steam and re-run ./patch.py to apply"))
+            print(yellow(f"    (or set Launch Options yourself: %command% {LAUNCHER_RENDER_FLAGS})"))
+            return False
+
+        # managed_dir = <steam>/steamapps/common/Cities Skylines II/Cities2_Data/Managed
+        steam_root = os.path.normpath(os.path.join(managed_dir, *[".."] * 5))
+        vdfs = glob.glob(os.path.join(steam_root, "userdata", "*", "config", "localconfig.vdf"))
+        if not vdfs:
+            print(yellow("  ⚠ No Steam userdata found next to this install (game in a"))
+            print(yellow("    secondary Steam library?) — set Launch Options manually in"))
+            print(yellow(f"    Steam → CS2 → Properties: %command% {LAUNCHER_RENDER_FLAGS}"))
+            return False
+
+        changed_any = False
+        for vdf in vdfs:
+            account = os.path.basename(os.path.dirname(os.path.dirname(vdf)))
+            with open(vdf, encoding="utf-8", errors="surrogateescape") as f:
+                text = f.read()
+
+            # The app's config block lives at Software/Valve/Steam/apps/949230; the
+            # bare string '"949230"  "<hex>"' elsewhere is an app ticket, so anchor
+            # on an "apps" OBJECT and search only inside it. Other sections can carry
+            # a same-named key, so scan every "apps" block until one holds the app.
+            apps = _vdf_find_block(text, "apps")
+            if not apps:
+                print(yellow(f"  ⚠ account {account}: no apps section, skipped"))
+                continue
+            app_span = None
+            while apps:
+                app = _vdf_find_block(text[apps[0]:apps[1]], CS2_APP_ID)
+                if app:
+                    app_span = (apps[0] + app[0], apps[0] + app[1])
+                    break
+                apps = _vdf_find_block(text, "apps", apps[1] + 1)
+            if not app_span:
+                print(yellow(f"  ⚠ account {account}: CS2 ({CS2_APP_ID}) not configured, skipped"))
+                continue
+            a_open, a_close = app_span
+
+            block = text[a_open:a_close]
+            # Value match must skip escaped characters (\" inside the value) — same
+            # rule the brace walker above follows — or a quote inside the user's
+            # options would truncate the match and corrupt the rewrite.
+            m = re.search(r'("LaunchOptions"\s*")((?:\\.|[^"\\])*)(")', block, re.IGNORECASE)
+            if m and LAUNCHER_RENDER_FLAGS in m.group(2):
+                print(green(f"  ✓ account {account}: launch options already set"))
+                continue
+
+            if m:  # append to whatever the user already has (Steam keeps the key even when blank)
+                existing = m.group(2).strip()
+                new_value = (existing + " " + LAUNCHER_RENDER_FLAGS) if existing \
+                    else f"%command% {LAUNCHER_RENDER_FLAGS}"
+                new_block = block[:m.start(2)] + new_value + block[m.end(2):]
+            else:  # insert a fresh key right after the block's opening brace
+                indent_m = re.search(r'\n([ \t]*)"', block)
+                indent = indent_m.group(1) if indent_m else "\t"
+                new_block = (block[:1]
+                             + f'\n{indent}"LaunchOptions"\t\t"%command% {LAUNCHER_RENDER_FLAGS}"'
+                             + block[1:])
+
+            bak = vdf + ".cs2patch.bak"
+            if not os.path.exists(bak):
+                shutil.copy2(vdf, bak)
+            with open(vdf, "w", encoding="utf-8", errors="surrogateescape") as f:
+                f.write(text[:a_open] + new_block + text[a_close:])
+            print(green(f"  ✓ account {account}: launch options written"))
+            changed_any = True
+
+        if changed_any:
+            print(green("  ✓ Paradox Launcher will use software rendering (SwiftShader)"))
+        return True
+    except Exception as e:                                  # never fail the patch flow
+        print(yellow(f"  ⚠ Launcher render fix failed: {e}"))
+        print(yellow(f"    Set it manually in Steam → CS2 → Properties → Launch Options:"))
+        print(yellow(f"    %command% {LAUNCHER_RENDER_FLAGS}"))
+        return False
 
 
 def menu(title, options):
@@ -421,18 +558,13 @@ def main():
         sys.exit(1)
 
     # ── Current patch status ─────────────────────────────────────────────────
-    # Mode is derived from which DLLs are patched, keyed off MODE_DLLS so the
-    # definition of each mode lives in one place.
     state = {d: dll_state(managed_dir, d) for d in DLLS}
-    core_patched = all(state[d] == "patched" for d in MODE_DLLS["lightweight"])
-    full_patched = all(state[d] == "patched" for d in MODE_DLLS["full"])
+    all_patched = all(state[d] == "patched" for d in DLLS)
     any_patched = any(v == "patched" for v in state.values())
     missing = [d for d in DLLS if state[d] == "missing"]
 
-    if full_patched:
-        print("  " + green(bold("● Already patched — Full (Lightweight + Paradox Mods)")))
-    elif core_patched:
-        print("  " + green(bold("● Already patched — Lightweight")))
+    if all_patched:
+        print("  " + green(bold("● Already patched")))
     elif any_patched:
         print("  " + yellow(bold("● Partially patched — re-patch to complete")))
     else:
@@ -442,13 +574,11 @@ def main():
     print()
 
     # ── Step 2: choose action ────────────────────────────────────────────────
-    # "Re-Patch" appears when that mode is already applied; the patcher is
+    # "Re-Patch" appears when everything is already applied; the patcher is
     # idempotent, so re-patching is the safe thing to do after a game update.
-    lw_verb   = f"{'Re-Patch' if core_patched else 'Patch':<8}"
-    full_verb = f"{'Re-Patch' if full_patched else 'Patch':<8}"
+    patch_verb = "Re-Patch" if all_patched else "Patch"
     actions = [
-        ("lightweight", f"{lw_verb} — Lightweight  (fixes launch + asset loading)"),
-        ("full",        f"{full_verb} — Full         (lightweight + Paradox Mods)"),
+        ("patch", f"{patch_verb} — apply all fixes (launch, assets, pause menu, snapping, Paradox Mods)"),
     ]
     if any_patched:                       # Restore only when there's something to undo
         actions.append(("restore", "Restore original files"))
@@ -467,8 +597,6 @@ def main():
         print()
         return
 
-    mode = action                        # "lightweight" or "full"
-
     # ── Step 3: ensure dotnet ────────────────────────────────────────────────
     # dotnet is always needed to run the C# patcher (it's not a compiled binary)
     print("\nChecking for dotnet...")
@@ -476,9 +604,9 @@ def main():
     print(f"  {green('✓')} dotnet: {dotnet}\n")
 
     # ── Step 4: preview (dry-run, writes nothing) ────────────────────────────
-    print(f"Step 1 of 2 — Preview ({mode}). Nothing is written yet.")
+    print("Step 1 of 2 — Preview. Nothing is written yet.")
     print("─" * 60)
-    preview_ok = run_patcher(dotnet, managed_dir, mode, apply=False)
+    preview_ok = run_patcher(dotnet, managed_dir, apply=False)
     print("─" * 60)
     if not preview_ok:
         print(yellow("  Preview reported warnings — review the output above before applying."))
@@ -489,18 +617,25 @@ def main():
         return
 
     # ── Step 5: apply ────────────────────────────────────────────────────────
-    print(f"\nStep 2 of 2 — Applying ({mode}). Originals are backed up to *.bak.")
+    print("\nStep 2 of 2 — Applying. Originals are backed up to *.bak.")
     print("─" * 60)
-    ok = run_patcher(dotnet, managed_dir, mode, apply=True)
+    ok = run_patcher(dotnet, managed_dir, apply=True)
     print("─" * 60 + "\n")
 
     # ── Step 6: verify outcome & summarise ───────────────────────────────────
+    # Always snapshot what actually patched (record_patched only records DLLs whose bytes
+    # differ from their .bak, and drops the rest). Gating this on `ok` meant one DLL's WARN
+    # discarded the manifest entries for the DLLs that DID patch, dropping their game-update
+    # downgrade protection — so record unconditionally after an apply.
+    record_patched(managed_dir)               # snapshot what we patched (see MANIFEST)
+    print()
+    ensure_launcher_render_fix(managed_dir)   # Paradox Launcher 2026.8+ window fix
+    print()
     if ok:
-        record_patched(managed_dir, mode)     # snapshot what we patched (see MANIFEST)
         # Trust the result, not the patcher's report: a game update can change method
         # bodies so patterns silently stop matching, leaving a DLL unpatched while the
         # patcher still reports SKIP / "already patched". Verify the bytes changed.
-        unpatched = [d for d in MODE_DLLS[mode] if dll_state(managed_dir, d) != "patched"]
+        unpatched = [d for d in DLLS if dll_state(managed_dir, d) != "patched"]
         if unpatched:
             print(yellow("⚠ Not fully patched. These DLLs did not change — this game"))
             print(yellow("  version may be unsupported (patch patterns didn't match):"))
@@ -508,10 +643,7 @@ def main():
             print(yellow("  The game will likely still misbehave; please report the game version.\n"))
         else:
             print(green("All done!") + "\n")
-            if mode == "full":
-                print("  Paradox Mods: launch the game and use the in-game mod browser.\n")
-            else:
-                print("  Game should now launch. Run again and pick Full to enable Paradox Mods.\n")
+            print("  Paradox Mods: launch the game and use the in-game mod browser.\n")
     else:
         print(yellow("Completed with warnings — check the output above.\n"))
 

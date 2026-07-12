@@ -12,13 +12,19 @@ static class PatchIo
     // Back up the original DLL (creating or refreshing a stale .bak), write the mutated
     // module to a temp file, then atomically move it into place.
     //
-    // Callers only reach this after fixes were applied, so the on-disk DLL is this game
-    // version's unpatched original. Refreshing a stale .bak (one left from a previous
-    // game version) keeps Restore from later downgrading the install to old binaries.
-    public static void BackupAndWrite(ModuleDefinition module, string dllPath)
+    // Refreshing a stale .bak (one left from a previous game version) keeps Restore from
+    // later downgrading the install to old binaries. But that refresh is only safe when
+    // the on-disk DLL is this game version's unpatched original. When a NEW fix is applied
+    // incrementally on top of an already-patched DLL (e.g. FIX 19 landing on a Game.dll
+    // that already carries FIX 18), the on-disk DLL is ours, not the original — refreshing
+    // would clobber the real original in the backup. Callers that can detect their own
+    // patch markers in the on-disk DLL pass preserveExistingBackup=true in that case.
+    public static void BackupAndWrite(ModuleDefinition module, string dllPath,
+        bool preserveExistingBackup = false)
     {
         var backup = dllPath + ".bak";
-        if (!File.Exists(backup) || !FilesEqual(dllPath, backup))
+        bool keepBackup = preserveExistingBackup && File.Exists(backup);
+        if (!keepBackup && (!File.Exists(backup) || !FilesEqual(dllPath, backup)))
             File.Copy(dllPath, backup, overwrite: true);
         var tmp = dllPath + ".tmp";
         module.Write(tmp);
