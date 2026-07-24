@@ -16,6 +16,7 @@ import select
 import hashlib
 import json
 import re
+import shlex
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PATCHER_PROJECT = os.path.join(SCRIPT_DIR, "cs2patcher")
@@ -47,18 +48,44 @@ def bold(t):   return c(t, "1")
 # Game locator — CrossOver only (Steam native not supported)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def find_game_installations():
-    bottles_root = os.path.expanduser(
-        "~/Library/Application Support/CrossOver/Bottles")
-    results = []
-    if not os.path.isdir(bottles_root):
-        return results
-    for bottle in os.listdir(bottles_root):
-        drive_c = os.path.join(bottles_root, bottle, "drive_c")
-        if not os.path.isdir(drive_c):
+def _bottle_roots():
+    """Every folder CrossOver bottles can live in. The GUI's "Bottles are stored
+    in" preference (BottleDir) relocates them wholesale — with bottles on, say, an
+    external volume there is NOTHING under ~/Library, and scanning only the default
+    silently finds no game. CrossOver's own CLI tools also honor $CX_BOTTLE_PATH."""
+    roots = [os.environ.get("CX_BOTTLE_PATH")]
+    try:
+        roots.append(subprocess.run(
+            ["defaults", "read", "com.codeweavers.CrossOver", "BottleDir"],
+            capture_output=True, text=True, timeout=10).stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    roots.append("~/Library/Application Support/CrossOver/Bottles")
+    seen, existing = set(), []
+    for root in roots:
+        if not root:
             continue
-        for managed in _search_managed(drive_c, depth=6):
-            results.append(managed)
+        root = os.path.expanduser(root)
+        real = os.path.realpath(root)   # env var and pref usually alias the same
+        if real not in seen and os.path.isdir(root):   # place — scan it once
+            seen.add(real)
+            existing.append(root)
+    return existing
+
+
+def find_game_installations():
+    results = []
+    for bottles_root in _bottle_roots():
+        try:
+            bottles = os.listdir(bottles_root)
+        except OSError:
+            continue
+        for bottle in bottles:
+            drive_c = os.path.join(bottles_root, bottle, "drive_c")
+            if not os.path.isdir(drive_c):
+                continue
+            for managed in _search_managed(drive_c, depth=6):
+                results.append(managed)
     return results
 
 
@@ -90,20 +117,49 @@ def _is_valid_managed(path):
 # dotnet detection & auto-install
 # ──────────────────────────────────────────────────────────────────────────────
 
+# The C# patcher targets net9.0 (cs2patcher/cs2patcher.csproj), so building it needs
+# an SDK at least that new. Newer majors are fine: an SDK builds lower targets, and
+# RollForward=Major in the csproj lets the built app run on a newer runtime.
+MIN_SDK_MAJOR = 9
+
+
+def _sdk_major(dotnet):
+    """Highest SDK major `dotnet` can build with, or 0 (runtime-only install /
+    not runnable). `--list-sdks` prints one "9.0.101 [/path]" line per SDK."""
+    try:
+        out = subprocess.run([dotnet, "--list-sdks"],
+                             capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    majors = [int(m.group(1)) for m in
+              (re.match(r"(\d+)\.", line) for line in out.splitlines()) if m]
+    return max(majors, default=0)
+
+
 def find_dotnet():
-    """Return path to dotnet CLI or None."""
-    # Check PATH first
-    p = shutil.which("dotnet")
-    if p:
-        return p
-    # Common install locations
-    for candidate in [
-        "/usr/local/share/dotnet/dotnet",
-        os.path.expanduser("~/.dotnet/dotnet"),
-        "/opt/homebrew/opt/dotnet/bin/dotnet",
-        "/opt/homebrew/share/dotnet/dotnet",
-    ]:
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+    """Return a dotnet CLI able to build the patcher (SDK >= MIN_SDK_MAJOR), or None.
+
+    Existing is not enough: a machine with only a stale install (say .NET 6 in
+    /usr/local/share/dotnet) has a perfectly working `dotnet` on PATH that still
+    fails the build with NETSDK1045 — so probe each candidate's SDK list and skip
+    the ones that are too old, instead of returning the first binary found."""
+    candidates = [shutil.which("dotnet"),
+                  "/usr/local/share/dotnet/dotnet",
+                  os.path.expanduser("~/.dotnet/dotnet"),
+                  "/opt/homebrew/bin/dotnet",
+                  "/opt/homebrew/opt/dotnet/bin/dotnet",
+                  "/opt/homebrew/share/dotnet/dotnet",
+                  *glob.glob("/usr/local/share/dotnet-sdk/*/dotnet")]
+    seen = set()
+    for candidate in candidates:
+        if not candidate or not os.path.isfile(candidate) \
+                or not os.access(candidate, os.X_OK):
+            continue
+        real = os.path.realpath(candidate)   # PATH hit and an explicit path often
+        if real in seen:                     # alias the same binary — probe once
+            continue
+        seen.add(real)
+        if _sdk_major(candidate) >= MIN_SDK_MAJOR:
             return candidate
     return None
 
@@ -114,7 +170,12 @@ def ensure_dotnet():
     if dotnet:
         return dotnet
 
-    print(yellow("  dotnet CLI not found — needed for IL patching."))
+    have = shutil.which("dotnet")
+    if have:
+        print(yellow(f"  dotnet at {have} has no SDK {MIN_SDK_MAJOR}+ — "
+                     "it cannot build the IL patcher (NETSDK1045)."))
+    else:
+        print(yellow("  dotnet CLI not found — needed for IL patching."))
 
     # Check Homebrew
     brew = shutil.which("brew")
@@ -127,28 +188,22 @@ def ensure_dotnet():
         ))
         sys.exit(1)
 
-    # Pin to .NET 9: the patcher targets net9.0, and the unversioned `dotnet-sdk`
-    # cask now installs .NET 10, whose runtime won't run a net9.0 app by default.
-    print(cyan("  Installing dotnet-sdk@9 via Homebrew (this may take a minute)..."))
+    # The unversioned cask tracks the current SDK, which builds net9.0 fine and — via
+    # RollForward=Major in the csproj — runs it too. The former dotnet-sdk@9 pin
+    # predates RollForward and lost its point once .NET 9 went EOL (May 2026).
+    # Installs side-by-side with any older SDKs.
+    print(cyan("  Installing dotnet-sdk via Homebrew (this may take a minute)..."))
     result = subprocess.run(
-        [brew, "install", "--cask", "dotnet-sdk@9"],
+        [brew, "install", "--cask", "dotnet-sdk"],
         capture_output=False
     )
     if result.returncode != 0:
-        print(red("  Homebrew install failed. Try manually: brew install --cask dotnet-sdk@9"))
+        print(red("  Homebrew install failed. Try manually: brew install --cask dotnet-sdk"))
         sys.exit(1)
 
-    # Try again after install
+    # The cask lands in /usr/local/share/dotnet, which find_dotnet probes explicitly,
+    # so this process's unchanged PATH doesn't matter.
     dotnet = find_dotnet()
-    if not dotnet:
-        # Homebrew installs to a versioned path; try to find it
-        for p in glob.glob("/usr/local/share/dotnet/dotnet") + \
-                 glob.glob("/opt/homebrew/opt/dotnet*/bin/dotnet") + \
-                 glob.glob("/usr/local/share/dotnet-sdk/*/dotnet"):
-            if os.path.isfile(p) and os.access(p, os.X_OK):
-                dotnet = p
-                break
-
     if not dotnet:
         print(red("  dotnet installed but not found. Open a new terminal and re-run the script."))
         sys.exit(1)
@@ -172,7 +227,10 @@ def run_patcher(dotnet, managed_dir, apply):
     if apply:
         cmd.append("--apply")
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # A fresh SDK's first run prints a welcome banner to stderr, which the stderr
+    # check below would misreport as an error — DOTNET_NOLOGO silences it.
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            env=dict(os.environ, DOTNET_NOLOGO="1"))
 
     ok = True
     for line in result.stdout.strip().splitlines():
@@ -210,6 +268,23 @@ def run_patcher(dotnet, managed_dir, apply):
 def shorten(path):
     home = os.path.expanduser("~")
     return "~" + path[len(home):] if path.startswith(home) else path
+
+
+def _clean_path(raw):
+    """Return `raw` as a usable filesystem path. Terminal.app pastes a
+    Finder-copied folder as a shell-quoted path ('/…/Cities Skylines 2/…') and a
+    drag-and-dropped one backslash-escaped, but input() is not a shell — that
+    quoting reaches us verbatim and then fails validation. Undo it only when the
+    text parses to exactly one shell token: a hand-typed path with bare spaces
+    parses to several and is taken literally."""
+    raw = raw.strip()
+    try:
+        parts = shlex.split(raw)
+    except ValueError:              # stray quote (e.g. …/alex's) — take literally
+        parts = []
+    if len(parts) == 1:
+        raw = parts[0]
+    return os.path.expanduser(raw)
 
 
 def _sha(path):
@@ -526,7 +601,7 @@ def main():
     # CLI override: python3 patch.py <managed-dir>
     cli_path = sys.argv[1] if len(sys.argv) > 1 else None
     if cli_path:
-        cli_path = os.path.expanduser(cli_path)
+        cli_path = _clean_path(cli_path)
 
     if cli_path and os.path.isdir(cli_path):
         print(f"Using path from argument:\n  {shorten(cli_path)}\n")
@@ -536,9 +611,7 @@ def main():
         found = find_game_installations()
         if not found:
             print("  No installation found automatically.\n")
-            managed_dir = input("Enter path to Cities2_Data/Managed: ").strip()
-            if managed_dir.startswith("~"):
-                managed_dir = os.path.expanduser(managed_dir)
+            managed_dir = _clean_path(input("Enter path to Cities2_Data/Managed: "))
         elif len(found) == 1:
             print(f"  Found: {shorten(found[0])}\n")
             managed_dir = found[0]
@@ -549,7 +622,7 @@ def main():
             if idx == len(found) + 1:        # Quit
                 return
             if idx == len(found):            # Enter path manually
-                managed_dir = os.path.expanduser(input("Path: ").strip())
+                managed_dir = _clean_path(input("Path: "))
             else:
                 managed_dir = found[idx]
 

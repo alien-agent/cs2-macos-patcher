@@ -22,7 +22,7 @@ git clone https://github.com/alien-agent/cs2-macos-patcher && cd cs2-macos-patch
 
 `patch.py` is a single **guided, interactive** tool. It walks you through:
 
-1. **Finds your game** automatically across all CrossOver bottles, and shows whether it's already patched
+1. **Finds your game** automatically across all CrossOver bottles — including a custom bottle folder set in CrossOver's settings — and shows whether it's already patched
 2. **Previews the change first** (a dry-run that writes nothing), then asks you to confirm
 3. **Applies all fixes** — launch, assets, pause menu, network snapping, Paradox Mods — and backs up the originals to `*.bak`
 4. Installs dotnet via Homebrew automatically if needed
@@ -30,8 +30,8 @@ git clone https://github.com/alien-agent/cs2-macos-patcher && cd cs2-macos-patch
 > **No dotnet?** No problem — the patcher installs it for you. You only
 > need [Homebrew](https://brew.sh).
 >
-> If you already have **.NET 10** but the patcher complains the `9.0.0` runtime is missing, install
-> the matching SDK: `brew install --cask dotnet-sdk@9`.
+> If dotnet is already installed, the patcher checks that it can build the fixes (SDK 9 or
+> newer) and installs a current SDK via Homebrew if yours is too old (e.g. a leftover .NET 6).
 
 ### After a game update
 
