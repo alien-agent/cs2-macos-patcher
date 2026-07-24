@@ -94,8 +94,8 @@ def _search_managed(root, depth):
         return
     try:
         entries = os.listdir(root)
-    except PermissionError:
-        return
+    except OSError:   # unreadable dir (permissions, I/O error on an external
+        return        # volume, vanished mid-scan) — skip it, not abort the run
     for entry in entries:
         full = os.path.join(root, entry)
         if not os.path.isdir(full):
