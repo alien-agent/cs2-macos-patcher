@@ -48,26 +48,50 @@ def bold(t):   return c(t, "1")
 # Game locator — CrossOver only (Steam native not supported)
 # ──────────────────────────────────────────────────────────────────────────────
 
+CROSSOVER_CONF = "~/Library/Application Support/CrossOver/CrossOver.conf"
+
+
+def _conf_bottle_path():
+    """BottlePath from CrossOver.conf's [CrossOver] section — the CLI-side twin of
+    the GUI's BottleDir preference, shipped commented out (so no match) by default."""
+    section = None
+    try:
+        with open(os.path.expanduser(CROSSOVER_CONF), errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("["):
+                    section = line.strip("[]").lower()
+                elif section == "crossover":
+                    m = re.match(r'"?BottlePath"?\s*=\s*"(.*)"$', line)
+                    if m:
+                        return os.path.expandvars(m.group(1))
+    except OSError:
+        pass
+    return None
+
+
 def _bottle_roots():
     """Every folder CrossOver bottles can live in. The GUI's "Bottles are stored
     in" preference (BottleDir) relocates them wholesale — with bottles on, say, an
     external volume there is NOTHING under ~/Library, and scanning only the default
-    silently finds no game. CrossOver's own CLI tools also honor $CX_BOTTLE_PATH."""
-    roots = [os.environ.get("CX_BOTTLE_PATH")]
+    silently finds no game. CrossOver's own CLI tools take the location from
+    $CX_BOTTLE_PATH, falling back to BottlePath in CrossOver.conf; both are
+    colon-separated *lists* of directories (see CXBottle.pm), so split them."""
+    settings = [os.environ.get("CX_BOTTLE_PATH"), _conf_bottle_path()]
     try:
-        roots.append(subprocess.run(
+        settings.append(subprocess.run(
             ["defaults", "read", "com.codeweavers.CrossOver", "BottleDir"],
             capture_output=True, text=True, timeout=10).stdout.strip())
     except (OSError, subprocess.TimeoutExpired):
         pass
-    roots.append("~/Library/Application Support/CrossOver/Bottles")
+    settings.append("~/Library/Application Support/CrossOver/Bottles")
     seen, existing = set(), []
-    for root in roots:
+    for root in [d for s in settings if s for d in s.split(":")]:
         if not root:
             continue
         root = os.path.expanduser(root)
-        real = os.path.realpath(root)   # env var and pref usually alias the same
-        if real not in seen and os.path.isdir(root):   # place — scan it once
+        real = os.path.realpath(root)   # env var, conf and pref usually alias the
+        if real not in seen and os.path.isdir(root):   # same place — scan it once
             seen.add(real)
             existing.append(root)
     return existing
