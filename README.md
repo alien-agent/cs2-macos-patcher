@@ -1,14 +1,14 @@
+<div align="right">
+
+**English** · [Español](README.es-ES.md)
+
+</div>
+
 # Cities: Skylines 2 — macOS / Wine Patcher
 
 Fixes crashes and enables Paradox Mods for **Cities: Skylines 2** running under CrossOver on macOS.
 
 Tested: **CrossOver 26 · Game v1.5.8f1–v1.6.0f1 · Apple Silicon (M3 Pro → M5 Max)**
-
-> **Elevated networks snapping to the ground?** An Apple Silicon bug (Rosetta miscompiles Unity's
-> Burst SIMD code and drops the height value) makes raised roads, bridges and pipes wrongly snap
-> down onto whatever is below them. **This patcher fixes it** — without the FPS regression
-> of the standalone [icetear/cs2-net-snap-fix](https://github.com/icetear/cs2-net-snap-fix) patch
-> (see [docs/technical.md](docs/technical.md)).
 
 ---
 
@@ -113,46 +113,15 @@ level, see [docs/technical.md](docs/technical.md).
 
 ---
 
-## Credits and prior work
+## Credits
 
-This patcher builds
-on [alexqzd/cs2-crossover-patcher](https://github.com/alexqzd/cs2-crossover-patcher), which provided
-the foundation fixes for `Colossal.IO.dll`, `Colossal.IO.AssetDatabase.dll`, and the initial Paradox
-Mods patches.
+This patcher stands on the work of:
 
-**What this patcher adds compared to alexqzd:**
+- **[alexqzd/cs2-crossover-patcher](https://github.com/alexqzd/cs2-crossover-patcher)** — the
+  original CrossOver patcher and the foundation fixes for `Colossal.IO.dll`,
+  `Colossal.IO.AssetDatabase.dll` and Paradox Mods.
+- **[icetear/cs2-net-snap-fix](https://github.com/icetear/cs2-net-snap-fix)** — root-cause
+  discovery of the elevated-network snapping bug (Rosetta miscompiling Unity's Burst SIMD code),
+  which this patcher's own snap fix is built on.
 
-- **Paradox Mods support for v1.5.8f1+.** alexqzd's patcher stopped working after the v1.5.6+
-  updates. Two root-cause bugs were identified and fixed properly:
-    1. `FileIO.GetLockToken` — a Win32 waitable timer for a 10-second lock timeout fires in
-       milliseconds under Wine, cancelling every download before it starts.
-    2. `FileIO.<CreateFileStream>.MoveNext` — Wine's `File.Exists` returns `true` for non-existent
-       files, causing the code to acquire a reader lock, fail to open the file, and exit the
-       exception handler without releasing the lock. All subsequent write attempts for the same path
-       hang forever.
-- **In-game pause menu fix (`Game.dll`).** The modding toolchain's Rider-IDE probe throws on
-  Wine's lying `File.Exists`/`Directory.Exists` during load; that thrown exception leaves the
-  **Esc / gear pause menu unable to open**. Forcing the two existence checks to `false` (the
-  truth under Wine) stops the throw and the menu works.
-- **Elevated-network snap fix (`Game.dll`).** On Apple Silicon, Rosetta breaks the Burst SIMD
-  height check, so bridges/power lines/pipes snap down onto structures below. The fix runs the
-  net tool's snap jobs on the (correct) managed path **only while the tool is active** — no
-  global Burst toggle, zero cost when the tool is closed. Same root-cause insight as
-  [icetear/cs2-net-snap-fix](https://github.com/icetear/cs2-net-snap-fix), without its
-  reported performance regression.
-- **Spurious `IOException: …Success` dialog fix (`Colossal.IO.dll`).** Wine reports a failed
-  file open with error code `0` ("Success") instead of "file not found", so reading an absent
-  settings file (e.g. `Benchmark.coc`) pops an in-game error overlay instead of being handled
-  silently. The fix remaps Wine's error-code-0 to file-not-found so the game's existing
-  handler swallows it.
-- **Paradox Launcher 2026.8+ fix.** The launcher self-updates silently and the new version's
-  Chromium can't create any GPU context under Wine — the launcher window never opens and the
-  game "won't start". `patch.py` automatically adds SwiftShader (software-rendering) flags to
-  CS2's Steam launch options, fixing the launcher without touching Paradox files. (Run
-  `./patch.py` with Steam closed for this step to apply.)
-- **Single guided command** — `./patch.py` handles everything: a dry-run **preview before
-  applying**, in-menu **restore**, and automatic dotnet installation.
-- **Auto-detection** of game across all CrossOver bottles.
-- **Every fix documented in its source file** — each patch lives in
-  [`cs2patcher/Fixes/`](cs2patcher/Fixes/) in a file named for the problem it fixes, with the
-  full root-cause writeup in its header; [docs/technical.md](docs/technical.md) is the index.
+Thanks to both for figuring these out first.

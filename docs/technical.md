@@ -28,6 +28,12 @@ files, failed operations report error code 0 ("Success"), `FindNextFile` reports
 on success, Win32 waitable timers fire in milliseconds, and Rosetta 2 miscompiles one
 Burst SIMD height check. Each fix makes the code behave as it would on real Windows.
 
+Prior work this builds on:
+[alexqzd/cs2-crossover-patcher](https://github.com/alexqzd/cs2-crossover-patcher) (the
+foundation Colossal.IO / Paradox Mods fixes) and
+[icetear/cs2-net-snap-fix](https://github.com/icetear/cs2-net-snap-fix) (root cause of the
+elevated-network snapping bug).
+
 ## How the patcher works
 
 - **`patch.py`** is the guided front end: finds the game across CrossOver bottles, shows

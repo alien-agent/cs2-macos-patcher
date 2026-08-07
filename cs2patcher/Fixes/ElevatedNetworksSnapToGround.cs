@@ -7,14 +7,17 @@
 // water pipes snap down onto the road/structure below instead of keeping their elevation
 // — snapping behaves purely 2D, as if the height (Y) axis didn't exist.
 //
+// CREDIT: the root cause below was discovered by icetear — see
+// https://github.com/icetear/cs2-net-snap-fix. This fix is built on that insight; thanks!
+//
 // ROOT CAUSE: the snap/height checks run inside Burst-compiled jobs. On Apple Silicon the
 // AOT SIMD code in lib_burst_generated.dll misbehaves under Rosetta 2 — the Y lane is
 // dropped from the comparison. The managed (Mono) version of the same jobs computes
-// correctly. Root cause identified by icetear/cs2-net-snap-fix; their default variant,
-// however, wraps EVERY system in Game.Net/Game.Tools/Game.Objects gated on a stateful
-// flag toggled in OnStartRunning/OnStopRunning — dozens of systems run managed and
-// main-thread-synced every frame while the net tool is selected (and forever, if the
-// flag sticks), which is the reported "game runs like shit" regression.
+// correctly. icetear's default variant wraps EVERY system in
+// Game.Net/Game.Tools/Game.Objects gated on a stateful flag toggled in
+// OnStartRunning/OnStopRunning — dozens of systems run managed and main-thread-synced
+// every frame while the net tool is selected (and forever, if the flag sticks), which is
+// the reported performance regression.
 //
 // FIX: wrap ONLY the tool-phase systems that compute snapping/course heights,
 // unconditionally, no flag. ECS only calls their OnUpdate while a tool is doing work, so

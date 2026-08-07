@@ -1,12 +1,14 @@
+<div align="right">
 
+[English](README.md) · **Español**
+
+</div>
 
 # Cities: Skylines 2 — Patcher para macOS / Wine
 
 Corrige fallos y habilita Paradox Mods para **Cities: Skylines 2** ejecutándose bajo CrossOver en macOS.
 
 Probado: **CrossOver 26 · Juego v1.5.8f1–v1.6.0f1 · Apple Silicon (M3 Pro → M5 Max)**
-
-> **¿Las redes elevadas quedan pegadas al suelo?** Un error de Apple Silicon (Rosetta descompila incorrectamente el código SIMD Burst de Unity y omite el valor de altura) hace que las carreteras elevadas, puentes y tuberías se fijen incorrectamente en lo que haya debajo. **Este parche lo corrige** — sin la regresión de FPS del parche independiente [icetear/cs2-net-snap-fix](https://github.com/icetear/cs2-net-snap-fix) (ver [docs/technical.md](docs/technical.md)).
 
 ---
 
@@ -106,43 +108,16 @@ Para una explicación completa de cada error de Wine que este parche evita y có
 
 ---
 
-## Créditos y trabajos previos
+## Créditos
 
-Este parche se basa
-en [alexqzd/cs2-crossover-patcher](https://github.com/alexqzd/cs2-crossover-patcher), que proporcionó
-las correcciones base para `Colossal.IO.dll`, `Colossal.IO.AssetDatabase.dll` y los parches iniciales de Paradox
-Mods.
+Este parche se apoya en el trabajo de:
 
-**Lo que añade este parche en comparación con alexqzd:**
+- **[alexqzd/cs2-crossover-patcher](https://github.com/alexqzd/cs2-crossover-patcher)** — el
+  parche original para CrossOver y las correcciones base de `Colossal.IO.dll`,
+  `Colossal.IO.AssetDatabase.dll` y Paradox Mods.
+- **[icetear/cs2-net-snap-fix](https://github.com/icetear/cs2-net-snap-fix)** — el
+  descubrimiento de la causa raíz del error de fijación de redes elevadas (Rosetta compilando
+  incorrectamente el código SIMD Burst de Unity), sobre el que se construye la corrección de
+  este parche.
 
-- **Soporte de Paradox Mods para v1.5.8f1+.** El parche de alexqzd dejó de funcionar tras las actualizaciones v1.5.6+.
-  Se identificaron y corrigieron adecuadamente dos errores raíz:
-    1. `FileIO.GetLockToken`: un temporizador waitable de Win32 para un tiempo de espera de bloqueo de 10 segundos se activa en
-       milisegundos bajo Wine, cancelando cada descarga antes de que comience.
-    2. `FileIO.<CreateFileStream>.MoveNext`: `File.Exists` de Wine devuelve `true` para archivos inexistentes, lo que hace que el código adquiera un bloqueo de lectura, falle al abrir el archivo y salga del
-       controlador de excepciones sin liberar el bloqueo. Todos los intentos de escritura posteriores para la misma ruta
-       se quedan colgados indefinidamente.
-- **Corrección del menú de pausa en el juego (`Game.dll`).** La sonda de Rider-IDE de la cadena de herramientas de modificación lanza una excepción debido a los `File.Exists`/`Directory.Exists`
-  falsos de Wine durante la carga; esa excepción lanzada impide que se abra el
-  **menú de pausa de Esc / engranaje**. Forzar las dos comprobaciones de existencia a `false` (la
-  realidad bajo Wine) detiene el lanzamiento y el menú funciona.
-- **Corrección de fijación de redes elevadas (`Game.dll`).** En Apple Silicon, Rosetta rompe la comprobación de altura SIMD Burst,
-  por lo que los puentes/líneas eléctricas/tuberías se fijan en las estructuras de abajo. La corrección ejecuta
-  las tareas de fijación de la herramienta de redes en la ruta administrada (correcta) **solo mientras la herramienta está activa** — sin
-  conmutación global de Burst, coste cero cuando la herramienta está cerrada. Mismo insight de causa raíz que
-  [icetear/cs2-net-snap-fix](https://github.com/icetear/cs2-net-snap-fix), pero sin la
-  regresión de rendimiento reportada.
-- **Corrección del diálogo falso `IOException: …Success` (`Colossal.IO.dll`).** Wine informa una apertura de archivo fallida con código de error `0` ("Success") en lugar de "archivo no encontrado", por lo que leer un archivo de configuración ausente (p. ej. `Benchmark.coc`) muestra una superposición de error en el juego en lugar de manejarse
-  en silencio. La corrección remapea el código de error 0 de Wine a "archivo no encontrado" para que el controlador existente del juego
-  lo ignore.
-- **Corrección de Paradox Launcher 2026.8+.** El lanzador se actualiza silenciosamente y el Chromium de la nueva versión
-  no puede crear ningún contexto de GPU bajo Wine: la ventana del lanzador nunca se abre y el
-  juego "no arranca". `patch.py` añade automáticamente banderas de SwiftShader (renderizado por software) a
-  las opciones de inicio de Steam de CS2, corrigiendo el lanzador sin modificar archivos de Paradox. (Ejecuta
-  `./patch.py` con Steam cerrado para que este paso se aplique.)
-- **Comando único guiado** — `./patch.py` maneja todo: una **vista previa de ejecución de prueba antes
-  de aplicar**, **restauración** desde el menú y instalación automática de dotnet.
-- **Detección automática** del juego en todas las botellas de CrossOver.
-- **Cada corrección documentada en su archivo fuente** — cada parche reside en
-  [`cs2patcher/Fixes/`](cs2patcher/Fixes/) en un archivo con el nombre del problema que corrige, con la
-  descripción completa de la causa raíz en su encabezado; [docs/technical.md](docs/technical.md) es el índice.
+Gracias a ambos por haberlo resuelto primero.
