@@ -211,36 +211,60 @@ CROSSOVER_WINE = "/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/b
 
 
 def _wine_reg(bottle, *args):
-    """Run `wine --bottle <bottle> reg <args>` and return the CompletedProcess."""
+    """Run `wine --bottle <bottle> reg <args>` and return the CompletedProcess.
+
+    `bottle` is the bottle's absolute path — CXBottle's find_bottle() takes a
+    path as-is for private bottles and only searches CX_BOTTLE_PATH when given a
+    bare name, and that search does not know about every location we scan (see
+    _bottle_roots). errors='replace' is not optional: wine's reg prints
+    localized messages in the bottle's OEM codepage (CP866 for a Russian
+    locale, say), which is not valid UTF-8 — strict decoding raises
+    UnicodeDecodeError and takes the whole run down."""
     return subprocess.run(
         [CROSSOVER_WINE, "--bottle", bottle, "--wait-children", "reg", *args],
-        capture_output=True, text=True, timeout=180)
+        capture_output=True, text=True, errors="replace", timeout=180)
 
 
 def _bottle_and_game_dir(managed_dir):
-    """For a CrossOver install, return (bottle_name, windows_game_dir) where
-    windows_game_dir is the game root ('C:\\...\\Cities Skylines II') as seen
-    inside the bottle. Returns (None, None) for non-CrossOver paths."""
+    """For a CrossOver install, return (bottle_dir, windows_game_dir): the bottle
+    is the directory holding drive_c, and windows_game_dir is the game root
+    ('C:\\...\\Cities Skylines II') as seen inside it. The bottle is recognised
+    by its own files, never by the name of the folder it sits in — bottles live
+    wherever the user's BottleDir points (see _bottle_roots), not only under a
+    directory called 'Bottles'. Returns (None, None) for non-CrossOver paths."""
     game_root = os.path.dirname(os.path.dirname(os.path.abspath(managed_dir)))
     parts = game_root.split(os.sep)
     try:
         i = parts.index("drive_c")
     except ValueError:
         return None, None
-    if i == 0 or "Bottles" not in parts[:i]:
+    if i == 0:
         return None, None
-    bottle = parts[i - 1]
+    bottle_dir = os.sep.join(parts[:i]) or os.sep
+    if not any(os.path.exists(os.path.join(bottle_dir, marker))
+               for marker in ("cxbottle.conf", "system.reg")):
+        return None, None
     win_path = "C:\\" + "\\".join(parts[i + 1:])
-    return bottle, win_path
+    return bottle_dir, win_path
 
 
 def _reg_query_user_path(bottle):
-    """Return the bottle's HKCU\\Environment PATH value, or '' if unset/unreadable."""
-    result = _wine_reg(bottle, "query", "HKCU\\Environment", "/v", "PATH")
+    """Return the bottle's HKCU\\Environment PATH value, '' when it is unset, or
+    None when the key could not be read at all.
+
+    Queries the whole key instead of `/v PATH`: for a missing value wine's reg
+    exits non-zero with a localized "not found" message, which is
+    indistinguishable from a real failure — and treating a failed read as "unset"
+    would overwrite the very PATH we failed to read. The key itself always exists
+    in a bottle (it holds TEMP/TMP), so rc != 0 means we could not talk to the
+    bottle, while a readable key with no PATH row means genuinely unset."""
+    result = _wine_reg(bottle, "query", "HKCU\\Environment")
+    if result.returncode != 0:
+        return None
     for line in result.stdout.splitlines():
         cols = line.split(None, 2)
-        if len(cols) == 3 and cols[0].upper() == "PATH" and cols[1].startswith("REG_"):
-            return cols[2].strip()
+        if len(cols) >= 2 and cols[0].upper() == "PATH" and cols[1].startswith("REG_"):
+            return cols[2].strip() if len(cols) == 3 else ""   # PATH set but empty
     return ""
 
 
@@ -255,7 +279,12 @@ def ensure_launcher_path_fix(managed_dir):
     the game directory on PATH restores the lookup through the fallback the
     launcher's Node runtime still performs. Idempotent; appends, never
     replaces, an existing user PATH. Failures only warn — the DLL patch is
-    already applied and remains useful without this."""
+    already applied and remains useful without this.
+
+    Why the bottle keeps working either way: wine APPENDS HKCU\\Environment's
+    PATH to the machine PATH from HKLM instead of replacing it (measured in a
+    scratch bottle: C:\\windows\\system32;... stays, the game dir lands at the
+    end), so nothing here can strip the system directories from PATH."""
     bottle, game_dir = _bottle_and_game_dir(managed_dir)
     if not bottle or not game_dir:
         print(yellow("  SKIP  launcher PATH — not a CrossOver bottle, cannot apply"))
@@ -265,6 +294,10 @@ def ensure_launcher_path_fix(managed_dir):
         return
     try:
         current = _reg_query_user_path(bottle)
+        if current is None:                   # never write a PATH we failed to read
+            print(yellow("  WARN  launcher PATH — cannot read the bottle's user PATH, "
+                         "leaving it alone"))
+            return
         if game_dir.lower() in [p.strip().lower() for p in current.split(";") if p.strip()]:
             print(f"  {green('OK')}    launcher PATH — game dir already present")
             return
@@ -276,7 +309,7 @@ def ensure_launcher_path_fix(managed_dir):
         else:
             print(yellow("  WARN  launcher PATH — reg add failed: "
                          + (result.stderr.strip() or result.stdout.strip())))
-    except (OSError, subprocess.TimeoutExpired) as e:
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
         print(yellow(f"  WARN  launcher PATH — {e}"))
 
 
