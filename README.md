@@ -54,6 +54,17 @@ The Managed folder is typically inside your CrossOver bottle:
   Program Files (x86)/.../Cities2_Data/Managed
 ```
 
+### Launcher error "exit code null" after updating CrossOver (26.2+)
+
+CrossOver 26.2's Wine changed executable lookup so that the Paradox launcher can no longer start
+`Cities2.exe` — every launch fails instantly with *"The game appears to have crashed or terminated
+unexpectedly (exit code null)"*, even on a correctly patched install (in the launcher logs:
+`spawn Cities2.exe ENOENT`).
+
+The patcher fixes this automatically during apply by adding the game directory to the bottle's
+user `PATH` (`HKCU\Environment` inside the bottle). After patching, **fully quit and restart Steam
+in the bottle** once so the launcher picks up the new environment.
+
 ### Restoring original DLLs
 
 Run `./patch.py` and choose **Restore original files** — it copies every `*.bak` back over its DLL.
