@@ -10,6 +10,7 @@ history. This document is the index.
 
 | Problem fixed | Slug (`CS2_SKIP`) | Was | DLL | Source |
 |---|---|---|---|---|
+| "IOException: Sharing violation" dialog while the crash reporter uploads logs | `error-dialog-on-crash-report-upload` | — | Backtrace.Unity.dll | [ErrorDialogOnCrashReportUpload.cs](../cs2patcher/Fixes/ErrorDialogOnCrashReportUpload.cs) |
 | Game crashes immediately on launch | `game-launch-crash` | — | Colossal.IO.dll | [GameLaunchCrash.cs](../cs2patcher/Fixes/GameLaunchCrash.cs) |
 | "IOException: …Success" error dialog on missing files | `error-dialog-on-missing-files` | FIX 20 | Colossal.IO.dll | [ErrorDialogOnMissingFiles.cs](../cs2patcher/Fixes/ErrorDialogOnMissingFiles.cs) |
 | Mods fail to load (asset scan crash) | `mods-fail-to-load` | — | Colossal.IO.AssetDatabase.dll | [ModsFailToLoad.cs](../cs2patcher/Fixes/ModsFailToLoad.cs) |
@@ -27,6 +28,12 @@ The common thread: Wine lies. `File.Exists`/`GetFileAttributes` report true for 
 files, failed operations report error code 0 ("Success"), `FindNextFile` reports failure
 on success, Win32 waitable timers fire in milliseconds, and Rosetta 2 miscompiles one
 Burst SIMD height check. Each fix makes the code behave as it would on real Windows.
+
+The two lies compound: a spurious error is not just noise, because Colossal's crash
+reporter uploads a report for every logged ERROR, and that upload reads the game's own
+log files while the logger still holds them open — which is how a phantom disk error in
+PDX.SDK surfaces as a "Sharing violation" dialog from Backtrace.Unity. `mod-io-errors`
+stops the phantom error; `error-dialog-on-crash-report-upload` stops the dialog.
 
 ## How the patcher works
 
@@ -69,6 +76,31 @@ game update moves the snap math into a different system.
 The behavior-parity harness used for the file-per-fix refactor, reusable for any patcher
 change: (1) dry-run against a live already-patched install must report all `SKIP`;
 (2) apply to pristine copies must reproduce the expected per-DLL fix counts (currently
-3 / 1 / 5 / 34) and be idempotent on re-run; (3) `ilverify` against the Managed dir must
-produce an error set identical to the pre-change output (Unity codegen noise only — any
-new entry is a regression); (4) Restore must return byte-identical pristine DLLs.
+1 / 3 / 1 / 5 / 36 for Backtrace.Unity / Colossal.IO / Colossal.IO.AssetDatabase /
+Game / PDX.SDK) and be idempotent on re-run; (3) `ilverify` must not add errors (see
+baseline below); (4) Restore must return byte-identical pristine DLLs.
+
+Build a pristine tree by symlinking the Managed dir and replacing each target with its
+`.bak`, then `ilverify <dll> -r '<tree>/*.dll'` before and after applying:
+
+| DLL | pristine | patched | notes |
+|---|---|---|---|
+| Backtrace.Unity.dll | 0 | 0 | — |
+| Colossal.IO.dll | 0 | 0 | — |
+| Colossal.IO.AssetDatabase.dll | 78 | 78 | genuine Unity codegen noise, untouched by us |
+| Game.dll | 13567 | 13567 | genuine Unity codegen noise, untouched by us |
+| PDX.SDK.dll | 0 | 0 | — |
+
+**The patcher adds no verification errors to any DLL.** The AssetDatabase and Game.dll
+figures are Unity's own unverifiable codegen, present before we touch anything; what
+matters is that patched equals pristine on every row. Any increase is a regression.
+
+PDX.SDK used to score 5, all ours: two `TryNonEmptyStack` (try regions opened
+mid-expression), two `InitLocals` (a helper added a local without the flag), and one
+`PathStackDepth` — a cancellation call site whose argument setup was four instructions
+long where the rewrite assumed three, leaving an orphaned `ldarg.0` that nothing popped.
+The lesson is in the shared helpers now: work out how far back a call's arguments reach
+by **stack accounting** (`PdxIl.StatementStart` / `ProtectedRegionStart` /
+`TryForceCallToFalse`), never by matching a fixed instruction shape — the SDK's call sites
+range from `ldarg.0; call` to `ldarg.0; ldfld; ldfld; ldflda; call`. `ilverify` is what
+catches the difference; Mono runs the broken shape without complaint.

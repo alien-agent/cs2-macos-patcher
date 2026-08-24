@@ -16,6 +16,7 @@ static class FixRegistry
 {
     public static readonly DllTarget[] Targets =
     {
+        new("Backtrace.Unity.dll",           new[] { "BacktraceHttpClient" },                 ResolverKind.None),
         new("Colossal.IO.dll",               new[] { "LongDirectory" },                       ResolverKind.None),
         new("Colossal.IO.AssetDatabase.dll", new[] { "FileSystemDataSource" },                ResolverKind.SearchDir),
         new("Game.dll",                      new[] { "RiderPathLocator", "NetToolSystem" },   ResolverKind.Fallback),
@@ -24,6 +25,9 @@ static class FixRegistry
 
     public static readonly IReadOnlyList<Fix> Fixes = new Fix[]
     {
+        // Backtrace.Unity.dll
+        new ErrorDialogOnCrashReportUpload(),
+
         // Colossal.IO.dll (historical order: error-code remap, then FindNextFile NOPs)
         new ErrorDialogOnMissingFiles(),
         new GameLaunchCrash(),
