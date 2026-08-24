@@ -77,6 +77,7 @@ cp Colossal.IO.dll.bak Colossal.IO.dll
 cp Colossal.IO.AssetDatabase.dll.bak Colossal.IO.AssetDatabase.dll
 cp Game.dll.bak Game.dll
 cp PDX.SDK.dll.bak PDX.SDK.dll
+cp Backtrace.Unity.dll.bak Backtrace.Unity.dll
 ```
 
 ---
@@ -89,8 +90,8 @@ My personal recommendation for best graphic/performance on Crossover 26:
 |-------------------------------|----------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **Graphics**                  | **D3DMetal**         | CS2 uses DirectX 12. D3DMetal (from Apple Game Porting Toolkit) is the only translator that supports DX12 properly. DXVK and wined3d are slower or broken for DX12. DXMT is DX11-only — do not use. |
 | **Synchronization**           | **MSync**            | Mach semaphore-based sync. Confirmed better than ESync for CS2.                                                                                                                                     |
-| **DLSS (powered by MetalFX)** | **Enabled**          | New in CrossOver 26. Requires DLSS to also be enabled inside the game. Significant FPS gain on Apple Silicon.                                                                                       |
-| **High Resolution Mode**      | **On**               | Disables pixel doubling — correct behaviour on Retina displays.                                                                                                                                     |
+| **DLSS (powered by MetalFX)** | **Enabled — but disable if CS2 crashes**          | New in CrossOver 26; needs DLSS enabled in-game too; big FPS gain on Apple Silicon. ⚠️ **Can cause native D3DMetal crashes a few minutes into play** on some setups (high resolution + heavy/asset-modded cities) — the game closes to desktop with no error dialog and Steam writes an `assert_cities2.exe_*.dmp`. If that happens, turn this **Off** (it is the MetalFX control); a long clean session with no new dumps confirms the fix.                                                                                       |
+| **High Resolution Mode**      | **On (with a capped in-game resolution)** | Disables pixel doubling so the UI stays crisp on Retina displays. ⚠️ It also lets CS2 render at the display's **native** resolution — on 5K/6K screens that is a ~6K render that tanks performance and aggravates the MetalFX crash above. Keep it **On only if** you cap the in-game **Resolution** to 1080p/1440p (see the [in-game settings](#in-game-graphics-settings) below); otherwise set it **Off** on high-res displays.                                                                                                                                     |
 | **Windows version**           | **Windows 10 or 11** | Do not use XP or 7 — they break .NET runtime features the game relies on.                                                                                                                           |
 | **AVX**                       | **Enabled**          | CrossOver 25+ exposes AVX to the game via `ROSETTA_ADVERTISE_AVX=1`. Improves performance on Apple Silicon under Rosetta.                                                                           |
 

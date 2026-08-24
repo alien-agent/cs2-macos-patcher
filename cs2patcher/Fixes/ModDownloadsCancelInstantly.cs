@@ -13,7 +13,13 @@
 //
 // FIX (per historical fix):
 // - was FIX 7 — force every `get_IsCancellationRequested` to false: NOP the token loads
-//   and rewrite the call itself to `ldc.i4.0`. Broad safety net.
+//   and rewrite the call itself to `ldc.i4.0`. Broad safety net. Which loads to NOP is
+//   worked out by stack accounting (PdxIl.TryForceCallToFalse), not by matching a fixed
+//   instruction shape: these call sites range from `ldarg.0; call` to
+//   `ldarg.0; ldfld; ldfld; ldflda; call`, and NOP-ing a fixed three of them left the
+//   fourth pushing a value nobody pops (ilverify: PathStackDepth in
+//   ModsDownloadManagerService.ProcessQueue). The old shape match is kept as the fallback
+//   for any site the walk cannot resolve.
 // - was FIX 11 — CreateFileIoResultFromException: NOP the `isinst TaskCanceledException`
 //   type test and make its brfalse unconditional — a TaskCanceledException is handled as
 //   a regular IO error (retried) instead of a cancellation (aborted).
@@ -72,14 +78,20 @@ sealed class ModCancelTokenChecks : PdxFix
                             break;
                         }
 
-                        if (prev.OpCode == OpCodes.Ldflda)
+                        // Preferred: NOP exactly the instructions that push this call's
+                        // receiver, worked out by stack accounting. The shape match below is
+                        // the pre-existing fallback for sites the walk cannot resolve.
+                        if (!PdxIl.TryForceCallToFalse(method, il[i]))
                         {
-                            if (i >= 3 && il[i - 2].OpCode == OpCodes.Ldfld) { il[i - 3].OpCode = OpCodes.Nop; il[i - 3].Operand = null; il[i - 2].OpCode = OpCodes.Nop; il[i - 2].Operand = null; }
-                            else if (i >= 2) { il[i - 2].OpCode = OpCodes.Nop; il[i - 2].Operand = null; }
-                            il[i - 1].OpCode = OpCodes.Nop; il[i - 1].Operand = null;
+                            if (prev.OpCode == OpCodes.Ldflda)
+                            {
+                                if (i >= 3 && il[i - 2].OpCode == OpCodes.Ldfld) { il[i - 3].OpCode = OpCodes.Nop; il[i - 3].Operand = null; il[i - 2].OpCode = OpCodes.Nop; il[i - 2].Operand = null; }
+                                else if (i >= 2) { il[i - 2].OpCode = OpCodes.Nop; il[i - 2].Operand = null; }
+                                il[i - 1].OpCode = OpCodes.Nop; il[i - 1].Operand = null;
+                            }
+                            else { il[i - 1].OpCode = OpCodes.Nop; il[i - 1].Operand = null; }
+                            il[i].OpCode = OpCodes.Ldc_I4_0; il[i].Operand = null;
                         }
-                        else { il[i - 1].OpCode = OpCodes.Nop; il[i - 1].Operand = null; }
-                        il[i].OpCode = OpCodes.Ldc_I4_0; il[i].Operand = null;
                     }
                     ctx.Applied++;
                 }
@@ -147,10 +159,15 @@ sealed class ModCancelOperationChecks : PdxFix
                             break;
                         }
 
-                        if (prev.OpCode == OpCodes.Ldfld && i >= 3 && il[i - 2].OpCode == OpCodes.Ldfld) { il[i - 3].OpCode = OpCodes.Nop; il[i - 3].Operand = null; il[i - 2].OpCode = OpCodes.Nop; il[i - 2].Operand = null; il[i - 1].OpCode = OpCodes.Nop; il[i - 1].Operand = null; }
-                        else if (prev.OpCode == OpCodes.Ldfld && i >= 2) { il[i - 2].OpCode = OpCodes.Nop; il[i - 2].Operand = null; il[i - 1].OpCode = OpCodes.Nop; il[i - 1].Operand = null; }
-                        else { il[i - 1].OpCode = OpCodes.Nop; il[i - 1].Operand = null; }
-                        il[i].OpCode = OpCodes.Ldc_I4_0; il[i].Operand = null;
+                        // Same as the FIX-7 shape: stack accounting first, shape match as
+                        // the pre-existing fallback.
+                        if (!PdxIl.TryForceCallToFalse(method, il[i]))
+                        {
+                            if (prev.OpCode == OpCodes.Ldfld && i >= 3 && il[i - 2].OpCode == OpCodes.Ldfld) { il[i - 3].OpCode = OpCodes.Nop; il[i - 3].Operand = null; il[i - 2].OpCode = OpCodes.Nop; il[i - 2].Operand = null; il[i - 1].OpCode = OpCodes.Nop; il[i - 1].Operand = null; }
+                            else if (prev.OpCode == OpCodes.Ldfld && i >= 2) { il[i - 2].OpCode = OpCodes.Nop; il[i - 2].Operand = null; il[i - 1].OpCode = OpCodes.Nop; il[i - 1].Operand = null; }
+                            else { il[i - 1].OpCode = OpCodes.Nop; il[i - 1].Operand = null; }
+                            il[i].OpCode = OpCodes.Ldc_I4_0; il[i].Operand = null;
+                        }
                     }
                     ctx.Applied++;
                 }
