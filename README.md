@@ -44,6 +44,23 @@ After updating the **patcher** itself (a new release of this repo, game unchange
 present as they were applied by the older release; Restore → Patch re-applies every fix in
 its current form.
 
+### Upgrade note: mods that reappear after deletion
+
+Older releases of this patcher, and upstream patchers carrying FIX 6, can leave deleted
+mods, superseded versions, and `.downloading` folders on disk. Update the patcher, then
+choose **Restore original files**, re-run `./patch.py`, and choose **Patch** as above.
+Do this even if the tool says **Already patched**: that status recognizes patched DLLs,
+but does not check which patcher release applied them.
+
+An explicit **Re-Patch** also repairs this particular deletion bug in place, preserving
+the existing backups. Restore → Patch remains the recommended upgrade procedure because
+it also refreshes older forms of the other fixes.
+
+Deletion still has a known limitation: if another process holds a mod file open, the SDK
+can silently leave that file and its folder behind after deleting the other files. Close
+the process holding the file and retry deletion; this repair does not add reliable error
+reporting for that case.
+
 ### Can't find the game automatically?
 
 Pass the Managed folder directly:

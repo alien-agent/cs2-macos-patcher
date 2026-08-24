@@ -17,13 +17,20 @@ history. This document is the index.
 | Pause menu (Esc / gear) won't open | `pause-menu-wont-open` | FIX 18 | Game.dll | [PauseMenuWontOpen.cs](../cs2patcher/Fixes/PauseMenuWontOpen.cs) |
 | Elevated networks snap down onto structures below | `elevated-networks-snap` | FIX 19 | Game.dll | [ElevatedNetworksSnapToGround.cs](../cs2patcher/Fixes/ElevatedNetworksSnapToGround.cs) |
 | Phantom IO errors/crashes during mod file operations | `mod-io-errors` | FIX 1, 2, 8 | PDX.SDK.dll | [ModIoErrorsAndCrashes.cs](../cs2patcher/Fixes/ModIoErrorsAndCrashes.cs) |
-| Mod files/directories never get created | `mod-install-files-not-created` | FIX 3, 4, 5, 6, 13 | PDX.SDK.dll | [ModInstallFilesNotCreated.cs](../cs2patcher/Fixes/ModInstallFilesNotCreated.cs) |
+| Mod files/directories never get created | `mod-install-files-not-created` | FIX 3, 4, 5, 13 | PDX.SDK.dll | [ModInstallFilesNotCreated.cs](../cs2patcher/Fixes/ModInstallFilesNotCreated.cs) |
 | Mod downloads abort instantly as "cancelled" | `mod-downloads-cancel` | FIX 7, 11, 12 | PDX.SDK.dll | [ModDownloadsCancelInstantly.cs](../cs2patcher/Fixes/ModDownloadsCancelInstantly.cs) |
 | Mod updates never re-download (stale state) | `mod-updates-never-redownload` | FIX 9, 10, 14 | PDX.SDK.dll | [ModUpdatesNeverRedownload.cs](../cs2patcher/Fixes/ModUpdatesNeverRedownload.cs) |
 | Mod downloads freeze; all later downloads deadlock | `mod-downloads-freeze` | FIX 15, 16 | PDX.SDK.dll | [ModDownloadsFreeze.cs](../cs2patcher/Fixes/ModDownloadsFreeze.cs) |
 | Paradox Mods broken on a fresh install | `fresh-install-mod-scan` | FIX 17 | PDX.SDK.dll | [FreshInstallModScanFails.cs](../cs2patcher/Fixes/FreshInstallModScanFails.cs) |
+| Deleting a mod does nothing — it reappears, old versions pile up | `mod-deletion-does-nothing` | — | PDX.SDK.dll | [ModDeletionDoesNothing.cs](../cs2patcher/Fixes/ModDeletionDoesNothing.cs) |
 | Paradox Launcher window never opens (2026.8+) | — (patch.py) | — | — | [`ensure_launcher_render_fix` in patch.py](../patch.py) |
 | Paradox Launcher reports "exit code null" (CrossOver 26.2+) | — (patch.py) | — | — | [`ensure_launcher_path_fix` in patch.py](../patch.py) |
+
+A fix can also be the bug. The old FIX 6 disabled GetLongPath's separator normalization,
+which put forward slashes inside `\\?\` extended-length paths and silently broke every
+recursive delete in the SDK — while FIX 1 hid the resulting error. It went unnoticed for
+months because both halves were "working as intended" in isolation. See
+ModDeletionDoesNothing.cs.
 
 The common thread: Wine lies. `File.Exists`/`GetFileAttributes` report true for missing
 files, failed operations report error code 0 ("Success"), `FindNextFile` reports failure
@@ -59,7 +66,9 @@ elevated-network snapping bug).
   with no markers (fresh game update) does refresh a stale `.bak`.
 - **Manifest** (`.cs2patch.json` in the Managed dir): records the sha256 of each DLL as
   patched. Restore uses it to refuse downgrading a DLL the game has since updated;
-  status uses it to tell "our patch" from "a new game version".
+  status uses it to tell "our patch" from "a new game version". It does not record the
+  patcher version: "Already patched" can describe an older patcher release, so follow
+  the README's upgrade instructions even when that status appears.
 - **Idempotency**: re-running is always safe. Each fix's search pattern no longer matches
   after it has been applied (`SKIP … already patched`), and re-applying after a game
   update patches only what the update reverted.
@@ -83,7 +92,7 @@ game update moves the snap math into a different system.
 The behavior-parity harness used for the file-per-fix refactor, reusable for any patcher
 change: (1) dry-run against a live already-patched install must report all `SKIP`;
 (2) apply to pristine copies must reproduce the expected per-DLL fix counts (currently
-1 / 3 / 1 / 5 / 35 for Backtrace.Unity / Colossal.IO / Colossal.IO.AssetDatabase /
+1 / 3 / 1 / 5 / 33 for Backtrace.Unity / Colossal.IO / Colossal.IO.AssetDatabase /
 Game / PDX.SDK) and be idempotent on re-run; (3) `ilverify` must not add errors (see
 baseline below); (4) Restore must return byte-identical pristine DLLs.
 
@@ -120,3 +129,34 @@ by **stack accounting** (`PdxIl.CallArgumentsStart` / `ProtectedRegionStart` /
 `TryForceCallToFalse`), never by matching a fixed instruction shape — the SDK's call sites
 range from `ldarg.0; call` to `ldarg.0; ldfld; ldfld; ldflda; call`. `ilverify` is what
 catches the difference; Mono runs the broken shape without complaint.
+
+### Mod deletion regression checks
+
+[`tests/ModDeletionSmokeTest.cs`](../tests/ModDeletionSmokeTest.cs) loads the real
+PDX.SDK DLL under a Windows runtime in CrossOver and calls `DiskIODefaultWindows` by
+reflection. It creates a unique directory below the supplied scratch parent and removes
+only that fixture tree. Use a disposable patched Managed tree, leaving the game closed:
+
+```bash
+dotnet build tests/ModDeletionSmokeTest.csproj
+"/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine" \
+  --bottle "<bottle-name>" --no-update --no-gui --debugmsg -all \
+  tests/bin/Debug/net472/ModDeletionSmokeTest.exe \
+  "<disposable-managed-dir>/PDX.SDK.dll" "<scratch-parent>"
+```
+
+The test covers both branches of `GetLongPath` (mixed-slash and already-prefixed paths),
+flat mods, nested and empty directories, and the disk phase of a mod update: move a
+staged version into place, remove its predecessor and `.downloading` staging directory,
+and check that the new version and a neighboring mod are intact. This tests the SDK disk
+operations used by cleanup; it does not exercise the online downloader or in-game playset
+state. For a DLL patched by main before this repair, the default test fails; `--legacy`
+instead checks that the malformed paths leave the old files and directories behind.
+
+The locked-file case first opens a real Win32 handle without `FILE_SHARE_DELETE` and
+checks that `DeleteFileW` fails with `ERROR_SHARING_VIOLATION` (32). With the repaired DLL,
+the SDK then returns normally after deleting the unlocked sibling, leaving the locked
+file and its parent directory. Releasing the handle and retrying removes the remainder.
+This is a **known limitation** of the existing `mod-io-errors` suppression: genuine IO
+failures are swallowed too. The separator repair enables deletion but does not make it
+atomic or give the caller reliable success reporting.
