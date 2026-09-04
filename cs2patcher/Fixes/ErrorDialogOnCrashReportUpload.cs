@@ -40,17 +40,35 @@
 //                         ; IsNullOrEmpty / !File.Exists / size guards already
 //                         ; branch to — i.e. the foreach's existing "skip this file"
 //
-// The try region starts at the `ldarg.1` that opens the statement, not at the throwing
-// call: a protected region must begin where the evaluation stack is empty, and by
-// File.ReadAllBytes the formData reference and the attachment name are already pushed.
+// Both ends of the region come from stack accounting, not from instruction shape. The
+// END is the statement-level (void) List.Add that consumes the bytes: the first Add in
+// straight-line code after ReadAllBytes, so the stack is empty once it returns. The
+// START is worked out backwards from that Add by PdxIl.ProtectedRegionStart — the
+// `ldarg.1` that pushes formData, where the stack is empty. The ReadAllBytes call has
+// to fall inside the region: that, not "the next Add", is what ties the Add to the
+// throw site.
+//
+// That `ldarg.1` is a branch target — the method's if/else over duplicate attachment
+// names merges into it. ECMA-335 lets control enter a try block at its first
+// instruction; only a jump INTO the middle is illegal, and the helper rejects that. The
+// result verifies (ilverify: 0 errors, see docs/technical.md).
+//
 // The handler nests inside the enumerator's finally and is inserted FIRST in the handler
-// table — ECMA-335 requires innermost-first ordering.
+// table — ECMA-335 requires innermost-first ordering. The 11 inserted bytes could push a
+// short-form branch spanning the loop body past ±127, and Cecil does not widen those, so
+// the body is SimplifyMacros()'d before the edit and OptimizeMacros()'d after (as in
+// ElevatedNetworksSnapToGround).
 //
 // IDEMPOTENCY / MARKER: the original method carries exactly one handler, the foreach
 // enumerator's Finally; ours adds the only Catch. Positive signature, used by IsApplied.
+// CAVEAT: "any catch (IOException) on this method" is not specific to OUR catch. Should
+// Colossal ship a Backtrace build that guards the read itself, the patcher SKIPs this
+// DLL and patch.py reports the version as possibly unsupported — bytes untouched, game
+// fine, message misleading. Same trade-off as ModIoBclCallWraps.IsApplied.
 
 using Mono.Cecil;
 using Mono.Cecil.Cil;
+using Mono.Cecil.Rocks;
 using System.Linq;
 
 namespace Cs2MacPatcher.Fixes;
@@ -75,6 +93,8 @@ sealed class ErrorDialogOnCrashReportUpload : Fix
         var method = FindTarget(ctx.Module);
         if (method?.HasBody != true) return;
         if (HasMarker(method)) return;                      // already patched
+        var ioException = PdxIl.IoExceptionRef(ctx.Module);
+        if (ioException == null) return;                    // no mscorlib ref: nothing to catch with
 
         var il = method.Body.Instructions;
 
@@ -84,17 +104,20 @@ sealed class ErrorDialogOnCrashReportUpload : Fix
             && mr.Name == "ReadAllBytes" && mr.DeclaringType.FullName == "System.IO.File");
         if (read == null) return;
 
-        // End of the statement: the List<IMultipartFormSection>.Add that consumes the bytes.
+        // End of the statement: the void List.Add that consumes the bytes. Straight-line
+        // code only — a branch or return before any Add means the read is not part of
+        // an add-statement, and the fix does not apply.
         var add = read;
         while ((add = add.Next) != null
-            && !(add.OpCode == OpCodes.Callvirt && add.Operand is MethodReference { Name: "Add" })) { }
+            && !(add.OpCode == OpCodes.Callvirt && add.Operand is MethodReference { Name: "Add" } mr
+                 && mr.ReturnType.MetadataType == MetadataType.Void))
+            if (add.OpCode.FlowControl is not (FlowControl.Next or FlowControl.Call)) return;
         if (add?.Next == null) return;
 
-        // Start of the statement: the `ldarg.1` (formData) that opens the push sequence.
-        // The evaluation stack is empty there, so the try region is stack-balanced.
-        var start = read;
-        while ((start = start.Previous) != null && start.OpCode != OpCodes.Ldarg_1) { }
-        if (start == null) return;
+        // Start of the statement, by stack accounting back from the Add. The region must
+        // contain the read: that is what makes this Add the one the read belongs to.
+        var start = PdxIl.ProtectedRegionStart(method, add);
+        if (start == null || il.IndexOf(start) > il.IndexOf(read)) return;
 
         // The foreach's `continue` target. Requiring that some existing branch already
         // targets it proves this is the loop-condition block the method's own guards
@@ -104,7 +127,9 @@ sealed class ErrorDialogOnCrashReportUpload : Fix
 
         if (!ctx.DryRun)
         {
-            var ilp = method.Body.GetILProcessor();
+            var body = method.Body;
+            body.SimplifyMacros();
+            var ilp = body.GetILProcessor();
             var leaveTry = ilp.Create(OpCodes.Leave, cont);
             var catchPop = ilp.Create(OpCodes.Pop);
             var leaveCatch = ilp.Create(OpCodes.Leave, cont);
@@ -113,22 +138,16 @@ sealed class ErrorDialogOnCrashReportUpload : Fix
             ilp.InsertAfter(catchPop, leaveCatch);
 
             // Innermost-first: this handler nests inside the enumerator's finally.
-            method.Body.ExceptionHandlers.Insert(0, new ExceptionHandler(ExceptionHandlerType.Catch)
+            body.ExceptionHandlers.Insert(0, new ExceptionHandler(ExceptionHandlerType.Catch)
             {
                 TryStart = start,
                 TryEnd = catchPop,
                 HandlerStart = catchPop,
                 HandlerEnd = cont,
-                CatchType = IoExceptionRef(ctx.Module),
+                CatchType = ioException,
             });
+            body.OptimizeMacros();
         }
         ctx.Applied++;
     }
-
-    // Hand-built against the module's own mscorlib. Never ImportReference from the
-    // patcher's .NET runtime — that would emit a System.Runtime ref Unity's Mono cannot
-    // bind. (Same reason PdxIl.IoExceptionRef exists for the PDX.SDK fixes.)
-    static TypeReference IoExceptionRef(ModuleDefinition module) =>
-        new("System.IO", "IOException", module,
-            module.AssemblyReferences.First(r => r.Name == "mscorlib"));
 }

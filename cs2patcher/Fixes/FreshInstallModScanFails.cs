@@ -52,6 +52,7 @@ sealed class FreshInstallModScanFails : PdxFix
         var diskIO = PdxIl.DiskIo(ctx.Module);
         if (diskIO == null) return;
         var ioExceptionRef = PdxIl.IoExceptionRef(ctx.Module);
+        if (ioExceptionRef == null) return;                 // no mscorlib ref: nothing to catch with
 
         foreach (var name in Targets)
         {

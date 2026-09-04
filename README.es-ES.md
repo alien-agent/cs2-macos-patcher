@@ -58,6 +58,7 @@ Ejecuta `./patch.py` y selecciona **Restaurar archivos originales**: copiará ca
 
 ```bash
 cd "<path-to>/Cities2_Data/Managed"
+cp Backtrace.Unity.dll.bak Backtrace.Unity.dll
 cp Colossal.IO.dll.bak Colossal.IO.dll
 cp Colossal.IO.AssetDatabase.dll.bak Colossal.IO.AssetDatabase.dll
 cp Game.dll.bak Game.dll

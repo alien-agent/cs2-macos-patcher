@@ -83,7 +83,7 @@ game update moves the snap math into a different system.
 The behavior-parity harness used for the file-per-fix refactor, reusable for any patcher
 change: (1) dry-run against a live already-patched install must report all `SKIP`;
 (2) apply to pristine copies must reproduce the expected per-DLL fix counts (currently
-1 / 3 / 1 / 5 / 36 for Backtrace.Unity / Colossal.IO / Colossal.IO.AssetDatabase /
+1 / 3 / 1 / 5 / 35 for Backtrace.Unity / Colossal.IO / Colossal.IO.AssetDatabase /
 Game / PDX.SDK) and be idempotent on re-run; (3) `ilverify` must not add errors (see
 baseline below); (4) Restore must return byte-identical pristine DLLs.
 
@@ -102,12 +102,21 @@ Build a pristine tree by symlinking the Managed dir and replacing each target wi
 figures are Unity's own unverifiable codegen, present before we touch anything; what
 matters is that patched equals pristine on every row. Any increase is a regression.
 
+The table holds for pristine → patch. It does **not** describe an install patched by an
+earlier release and then re-patched in place: idempotency is judged per fix by "my
+pattern no longer matches" (no `get_IsCancellationRequested` left, an `IOException`
+handler already on the method), so the old shapes — the mid-expression try regions, the
+orphaned `ldarg.0` — survive an incremental run untouched. They work; they just do not
+verify. To get the current shapes on an existing install, **Restore, then Patch** (the
+README says so under "After a game update"). This matters whenever a release changes
+how an existing fix is emitted, not only what it fixes.
+
 PDX.SDK used to score 5, all ours: two `TryNonEmptyStack` (try regions opened
 mid-expression), two `InitLocals` (a helper added a local without the flag), and one
 `PathStackDepth` — a cancellation call site whose argument setup was four instructions
 long where the rewrite assumed three, leaving an orphaned `ldarg.0` that nothing popped.
 The lesson is in the shared helpers now: work out how far back a call's arguments reach
-by **stack accounting** (`PdxIl.StatementStart` / `ProtectedRegionStart` /
+by **stack accounting** (`PdxIl.CallArgumentsStart` / `ProtectedRegionStart` /
 `TryForceCallToFalse`), never by matching a fixed instruction shape — the SDK's call sites
 range from `ldarg.0; call` to `ldarg.0; ldfld; ldfld; ldflda; call`. `ilverify` is what
 catches the difference; Mono runs the broken shape without complaint.

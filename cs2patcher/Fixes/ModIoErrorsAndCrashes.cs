@@ -29,17 +29,25 @@
 // - was FIX 1 — long-path methods (DeleteLongPathFile, DeleteLongPathDirectory,
 //   CreateLongPathDirectory, LongPathMove): NOP every `newobj IOException; throw` pair
 //   that follows a P/Invoke error check. The operation's real outcome stands.
-// - was FIX 2 — short-path methods (DeleteFile, DeleteDirectory, CreateDirectory,
-//   MoveDirectory): wrap the BCL call (File.Delete / Directory.*) in try-catch(IOException)
-//   — Wine's spurious exceptions are swallowed, real work is already done (or was never
-//   needed). The wrapped region starts at the STATEMENT, not at the call: a protected
-//   region must open with an empty evaluation stack, and the call's arguments are already
-//   pushed by then (see PdxIl.ProtectedRegionStart).
+// - was FIX 2 — short-path methods (DeleteFile, DeleteDirectory, CreateDirectory): wrap
+//   the BCL call (File.Delete / Directory.*) in try-catch(IOException) — Wine's spurious
+//   exceptions are swallowed, and for these operations that is safe: the work is either
+//   already done or was never needed (deleting what is gone, creating what exists). The
+//   wrapped region starts at the STATEMENT, not at the call: a protected region must open
+//   with an empty evaluation stack, and the call's arguments are already pushed by then
+//   (see PdxIl.ProtectedRegionStart). The 5 inserted bytes could push a short-form
+//   branch past ±127 and Cecil does not widen those, so the body is SimplifyMacros()'d
+//   before the edit and OptimizeMacros()'d after.
 //
 //   NOTE: the original target list named "Delete" and "Move", which match no method on
-//   this game version — the real names are DeleteFile and MoveDirectory, so the delete
-//   and move paths were never actually wrapped. Both real names are now covered; the two
-//   original names are kept in case an older PDX.SDK build used them.
+//   this game version. The real file-delete name is DeleteFile, so the delete path was
+//   never actually wrapped — it is now, and "Delete" stays in case an older PDX.SDK build
+//   used it. MoveDirectory (the real name behind "Move") is deliberately NOT wrapped: a
+//   move is not idempotent, so a swallowed genuine failure (destination exists, source
+//   locked, cross-volume) would leave the SDK recording a mod as installed that never
+//   moved — a half-installed mod with nothing in the log. Wine's known move lie is
+//   MoveFileW's return value in LongPathMove, which FIX 1 already covers; there is no
+//   evidence of one on the Directory.Move path.
 // - was FIX 8 — CreateLongPathFileStream: NOP the invalid-handle `newobj IOException;
 //   throw` (first occurrence) — Wine hands back handles it then calls invalid.
 //
@@ -49,6 +57,7 @@
 
 using Mono.Cecil;
 using Mono.Cecil.Cil;
+using Mono.Cecil.Rocks;
 using System.Linq;
 
 namespace Cs2MacPatcher.Fixes;
@@ -93,8 +102,7 @@ sealed class ModIoBclCallWraps : PdxFix
         ("DeleteFile",      "System.IO.File",      "Delete"),
         ("DeleteDirectory", "System.IO.Directory", "Delete"),
         ("CreateDirectory", "System.IO.Directory", "CreateDirectory"),
-        ("Move",            "System.IO.Directory", "Move"),            // pre-1.6 name
-        ("MoveDirectory",   "System.IO.Directory", "Move"),
+        ("Move",            "System.IO.Directory", "Move"),            // pre-1.6 name; matches nothing on 1.6 — see NOTE
     };
 
     public override bool IsApplied(ModuleDefinition module)
@@ -111,6 +119,7 @@ sealed class ModIoBclCallWraps : PdxFix
         var diskIO = PdxIl.DiskIo(ctx.Module);
         if (diskIO == null) return;
         var ioExceptionRef = PdxIl.IoExceptionRef(ctx.Module);
+        if (ioExceptionRef == null) return;                 // no mscorlib ref: nothing to catch with
 
         foreach (var (methodName, typeName, callName) in Fix2Targets)
         {
@@ -135,23 +144,28 @@ sealed class ModIoBclCallWraps : PdxFix
 
             if (!ctx.DryRun)
             {
-                var il = method.Body.GetILProcessor();
+                var body = method.Body;
+                body.SimplifyMacros();
+                var il = body.GetILProcessor();
                 // Open the region where the stack is empty; fall back to the call itself
                 // if this method's shape is not straight-line argument setup (the wrap
                 // still protects, it just is not verifiable).
                 var tryStart = PdxIl.ProtectedRegionStart(method, targetCall) ?? targetCall;
-                var tryLeave = il.Create(OpCodes.Leave_S, afterHandler);
+                var tryLeave = il.Create(OpCodes.Leave, afterHandler);
                 if (retAfter.OpCode == OpCodes.Pop) il.InsertAfter(retAfter, tryLeave); else il.InsertAfter(targetCall, tryLeave);
                 var catchPop = il.Create(OpCodes.Pop);
                 il.InsertAfter(tryLeave, catchPop);
-                var catchLeave = il.Create(OpCodes.Leave_S, afterHandler);
+                var catchLeave = il.Create(OpCodes.Leave, afterHandler);
                 il.InsertAfter(catchPop, catchLeave);
-                method.Body.ExceptionHandlers.Add(new ExceptionHandler(ExceptionHandlerType.Catch)
+                // Innermost-first (ECMA-335): a wrap around one call nests inside any
+                // handler the method already has, so it goes at the front of the table.
+                body.ExceptionHandlers.Insert(0, new ExceptionHandler(ExceptionHandlerType.Catch)
                 {
                     TryStart = tryStart, TryEnd = catchPop,
                     HandlerStart = catchPop, HandlerEnd = afterHandler,
                     CatchType = ioExceptionRef
                 });
+                body.OptimizeMacros();
             }
             ctx.Applied++;
         }
