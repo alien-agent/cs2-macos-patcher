@@ -25,7 +25,8 @@ PATCHER_PROJECT = os.path.join(SCRIPT_DIR, "cs2patcher")
 # this mirror lets patch.py report status without invoking dotnet. There is one Patch
 # action that applies everything — every fix repairs Wine breakage without touching
 # gameplay, security or achievements, so a partial patch has no use.
-DLLS = ["Colossal.IO.dll", "Colossal.IO.AssetDatabase.dll", "Game.dll", "PDX.SDK.dll"]
+DLLS = ["Backtrace.Unity.dll", "Colossal.IO.dll", "Colossal.IO.AssetDatabase.dll",
+        "Game.dll", "PDX.SDK.dll"]
 
 # Records the sha256 of each DLL as we patched it. A later game update replaces the
 # DLL out from under its (now stale) .bak; without this record a plain byte-compare

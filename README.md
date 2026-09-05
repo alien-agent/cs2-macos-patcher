@@ -39,6 +39,11 @@ Re-run `./patch.py` and Patch again. The preview and the patcher both detect
 already-patched files and skip them, then apply any new fixes to updated DLLs — it's always safe to
 re-run.
 
+After updating the **patcher** itself (a new release of this repo, game unchanged), choose
+**Restore original files** first and then Patch. A plain re-run keeps fixes it finds already
+present as they were applied by the older release; Restore → Patch re-applies every fix in
+its current form.
+
 ### Can't find the game automatically?
 
 Pass the Managed folder directly:
@@ -73,6 +78,7 @@ Prefer to do it by hand? The backups are plain copies:
 
 ```bash
 cd "<path-to>/Cities2_Data/Managed"
+cp Backtrace.Unity.dll.bak Backtrace.Unity.dll
 cp Colossal.IO.dll.bak Colossal.IO.dll
 cp Colossal.IO.AssetDatabase.dll.bak Colossal.IO.AssetDatabase.dll
 cp Game.dll.bak Game.dll
