@@ -29,6 +29,9 @@
 // - was FIX 1 — long-path methods (DeleteLongPathFile, DeleteLongPathDirectory,
 //   CreateLongPathDirectory, LongPathMove): NOP every `newobj IOException; throw` pair
 //   that follows a P/Invoke error check. The operation's real outcome stands.
+//   This also hides genuine failures: a locked mod file can remain after its unlocked
+//   siblings are deleted, with no exception reported. Deletion is best-effort, not atomic;
+//   see ModDeletionDoesNothing.cs and tests/ModDeletionSmokeTest.cs for the verified case.
 // - was FIX 2 — short-path methods (DeleteFile, DeleteDirectory, CreateDirectory): wrap
 //   the BCL call (File.Delete / Directory.*) in try-catch(IOException) — Wine's spurious
 //   exceptions are swallowed, and for these operations that is safe: the work is either

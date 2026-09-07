@@ -45,7 +45,6 @@ static class FixRegistry
         new ModInstallLongPathSegments(),    // 3
         new ModInstallCreateDirectory(),     // 4
         new ModInstallCreateWriteStream(),   // 5
-        new ModInstallPathSeparators(),      // 6
         new ModCancelTokenChecks(),          // 7
         new ModIoInvalidHandleThrow(),       // 8
         new ModRedownloadManifestFiles(),    // 9
@@ -57,5 +56,8 @@ static class FixRegistry
         new ModFreezeLockTimeout(),          // 15
         new ModFreezeReaderLockLeak(),       // 16
         new FreshInstallModScanFails(),      // 17
+
+        // PDX.SDK.dll — repairs the harm the old FIX 6 did (see the fix's header)
+        new ModDeletionDoesNothing(),
     };
 }
