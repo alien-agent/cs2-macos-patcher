@@ -35,26 +35,28 @@ git clone https://github.com/alien-agent/cs2-macos-patcher && cd cs2-macos-patch
 
 ### After a game update
 
-Re-run `./patch.py` and Patch again. The preview and the patcher both detect
-already-patched files and skip them, then apply any new fixes to updated DLLs — it's always safe to
-re-run.
+Re-run `./patch.py` and Patch again. A DLL the update replaced is a fresh original: every
+fix is applied to it and its `.bak` is refreshed. DLLs the update left alone are rebuilt
+from their backups as described next — it's always safe to re-run.
 
-After updating the **patcher** itself (a new release of this repo, game unchanged), choose
-**Restore original files** first and then Patch. A plain re-run keeps fixes it finds already
-present as they were applied by the older release; Restore → Patch re-applies every fix in
-its current form.
+### After updating the patcher
+
+Re-run `./patch.py` and choose **Re-Patch**. It restores every DLL it patched earlier from
+its `.bak` original and applies all fixes again in their current form, so a fix whose
+code changed between releases is picked up even though its older form was already in
+place (a plain re-apply on top would report it as already patched). The preview lists
+exactly what the rebuild applies.
 
 ### Upgrade note: mods that reappear after deletion
 
 Older releases of this patcher, and upstream patchers carrying FIX 6, can leave deleted
-mods, superseded versions, and `.downloading` folders on disk. Update the patcher, then
-choose **Restore original files**, re-run `./patch.py`, and choose **Patch** as above.
-Do this even if the tool says **Already patched**: that status recognizes patched DLLs,
-but does not check which patcher release applied them.
+mods, superseded versions, and `.downloading` folders on disk. Update the patcher and
+choose **Re-Patch** as above; the rebuilt PDX.SDK.dll no longer carries FIX 6.
 
-An explicit **Re-Patch** also repairs this particular deletion bug in place, preserving
-the existing backups. Restore → Patch remains the recommended upgrade procedure because
-it also refreshes older forms of the other fixes.
+Installs patched before the patcher kept a manifest (no `.cs2patch.json` next to the DLLs)
+are not rebuilt automatically. There Re-Patch still repairs this particular deletion bug in
+place, preserving the existing backups; choose **Restore original files** and then
+**Patch** to refresh the other fixes as well.
 
 Deletion still has a known limitation: if another process holds a mod file open, the SDK
 can silently leave that file and its folder behind after deleting the other files. Close
@@ -112,8 +114,8 @@ My personal recommendation for best graphic/performance on Crossover 26:
 |-------------------------------|----------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **Graphics**                  | **D3DMetal**         | CS2 uses DirectX 12. D3DMetal (from Apple Game Porting Toolkit) is the only translator that supports DX12 properly. DXVK and wined3d are slower or broken for DX12. DXMT is DX11-only — do not use. |
 | **Synchronization**           | **MSync**            | Mach semaphore-based sync. Confirmed better than ESync for CS2.                                                                                                                                     |
-| **DLSS (powered by MetalFX)** | **Enabled**          | New in CrossOver 26. Requires DLSS to also be enabled inside the game. Significant FPS gain on Apple Silicon.                                                                                       |
-| **High Resolution Mode**      | **On**               | Disables pixel doubling — correct behaviour on Retina displays.                                                                                                                                     |
+| **DLSS (powered by MetalFX)** | **Enabled — but disable if CS2 crashes**          | New in CrossOver 26; needs DLSS enabled in-game too; big FPS gain on Apple Silicon. ⚠️ **Can cause native D3DMetal crashes a few minutes into play** on some setups (high resolution + heavy/asset-modded cities) — the game closes to desktop with no error dialog and Steam writes an `assert_cities2.exe_*.dmp`. If that happens, turn this **Off** (it is the MetalFX control); a long clean session with no new dumps confirms the fix.                                                                                       |
+| **High Resolution Mode**      | **On (with a capped in-game resolution)** | Disables pixel doubling so the UI stays crisp on Retina displays. ⚠️ It also lets CS2 render at the display's **native** resolution — on 5K/6K screens that is a ~6K render that tanks performance and aggravates the MetalFX crash above. Keep it **On only if** you cap the in-game **Resolution** to 1080p/1440p (see the [in-game settings](#in-game-graphics-settings) below); otherwise set it **Off** on high-res displays.                                                                                                                                     |
 | **Windows version**           | **Windows 10 or 11** | Do not use XP or 7 — they break .NET runtime features the game relies on.                                                                                                                           |
 | **AVX**                       | **Enabled**          | CrossOver 25+ exposes AVX to the game via `ROSETTA_ADVERTISE_AVX=1`. Improves performance on Apple Silicon under Rosetta.                                                                           |
 
