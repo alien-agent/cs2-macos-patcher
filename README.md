@@ -35,26 +35,28 @@ git clone https://github.com/alien-agent/cs2-macos-patcher && cd cs2-macos-patch
 
 ### After a game update
 
-Re-run `./patch.py` and Patch again. The preview and the patcher both detect
-already-patched files and skip them, then apply any new fixes to updated DLLs — it's always safe to
-re-run.
+Re-run `./patch.py` and Patch again. A DLL the update replaced is a fresh original: every
+fix is applied to it and its `.bak` is refreshed. DLLs the update left alone are rebuilt
+from their backups as described next — it's always safe to re-run.
 
-After updating the **patcher** itself (a new release of this repo, game unchanged), choose
-**Restore original files** first and then Patch. A plain re-run keeps fixes it finds already
-present as they were applied by the older release; Restore → Patch re-applies every fix in
-its current form.
+### After updating the patcher
+
+Re-run `./patch.py` and choose **Re-Patch**. It restores every DLL it patched earlier from
+its `.bak` original and applies all fixes again in their current form, so a fix whose
+code changed between releases is picked up even though its older form was already in
+place (a plain re-apply on top would report it as already patched). The preview lists
+exactly what the rebuild applies.
 
 ### Upgrade note: mods that reappear after deletion
 
 Older releases of this patcher, and upstream patchers carrying FIX 6, can leave deleted
-mods, superseded versions, and `.downloading` folders on disk. Update the patcher, then
-choose **Restore original files**, re-run `./patch.py`, and choose **Patch** as above.
-Do this even if the tool says **Already patched**: that status recognizes patched DLLs,
-but does not check which patcher release applied them.
+mods, superseded versions, and `.downloading` folders on disk. Update the patcher and
+choose **Re-Patch** as above; the rebuilt PDX.SDK.dll no longer carries FIX 6.
 
-An explicit **Re-Patch** also repairs this particular deletion bug in place, preserving
-the existing backups. Restore → Patch remains the recommended upgrade procedure because
-it also refreshes older forms of the other fixes.
+Installs patched before the patcher kept a manifest (no `.cs2patch.json` next to the DLLs)
+are not rebuilt automatically. There Re-Patch still repairs this particular deletion bug in
+place, preserving the existing backups; choose **Restore original files** and then
+**Patch** to refresh the other fixes as well.
 
 Deletion still has a known limitation: if another process holds a mod file open, the SDK
 can silently leave that file and its folder behind after deleting the other files. Close
