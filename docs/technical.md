@@ -66,12 +66,24 @@ elevated-network snapping bug).
   with no markers (fresh game update) does refresh a stale `.bak`.
 - **Manifest** (`.cs2patch.json` in the Managed dir): records the sha256 of each DLL as
   patched. Restore uses it to refuse downgrading a DLL the game has since updated;
-  status uses it to tell "our patch" from "a new game version". It does not record the
-  patcher version: "Already patched" can describe an older patcher release, so follow
-  the README's upgrade instructions even when that status appears.
+  status uses it to tell "our patch" from "a new game version"; and (Re-)Patch uses it
+  to decide what to rebuild — see the next bullet.
+- **Re-Patch rebuilds from the backups** (`apply_fixes` in `patch.py`): every DLL whose
+  bytes the manifest confirms as ours, and whose `.bak` exists, is restored from that
+  `.bak` first and then patched from scratch. A fix's idempotency marker only says "some
+  form of this fix is here", so applying on top of the previous patch would keep a fix
+  whose emitted IL changed between releases in its old form (`SKIP … already patched`
+  for every DLL, stale bytes on disk). A DLL the game replaced (sha mismatch) is not
+  rebuilt: its `.bak` is stale, so it is patched in place and its `.bak` refreshed. The
+  preview mirrors the rebuild — it dry-runs against a temporary symlink view of Managed
+  in which those DLLs are their `.bak` originals — so it lists what the rebuild applies
+  instead of "already patched". `tests/test_patch_py.py` covers these decisions
+  (`python3 -m unittest tests/test_patch_py.py`); it stands in for `cs2patcher` with a
+  fake honouring the same on-disk contract.
 - **Idempotency**: re-running is always safe. Each fix's search pattern no longer matches
-  after it has been applied (`SKIP … already patched`), and re-applying after a game
-  update patches only what the update reverted.
+  after it has been applied (`SKIP … already patched`), so an install without a manifest
+  is patched in place, and re-applying after a game update patches only what the update
+  reverted.
 
 ## Debugging a game update
 
@@ -116,9 +128,10 @@ earlier release and then re-patched in place: idempotency is judged per fix by "
 pattern no longer matches" (no `get_IsCancellationRequested` left, an `IOException`
 handler already on the method), so the old shapes — the mid-expression try regions, the
 orphaned `ldarg.0` — survive an incremental run untouched. They work; they just do not
-verify. To get the current shapes on an existing install, **Restore, then Patch** (the
-README says so under "After a game update"). This matters whenever a release changes
-how an existing fix is emitted, not only what it fixes.
+verify. That is why Re-Patch rebuilds from the `.bak` originals (see "Re-Patch rebuilds
+from the backups" above); only an install without a manifest still needs a manual
+**Restore, then Patch**. This matters whenever a release changes how an existing fix is
+emitted, not only what it fixes.
 
 PDX.SDK used to score 5, all ours: two `TryNonEmptyStack` (try regions opened
 mid-expression), two `InitLocals` (a helper added a local without the flag), and one

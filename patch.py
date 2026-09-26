@@ -17,6 +17,7 @@ import hashlib
 import json
 import re
 import shlex
+import tempfile
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PATCHER_PROJECT = os.path.join(SCRIPT_DIR, "cs2patcher")
@@ -507,6 +508,67 @@ def restore_dlls(managed_dir):
     return restored
 
 
+def _rebuildable_dlls(managed_dir):
+    """DLLs a (Re-)Patch rebuilds from their .bak: the manifest confirms the on-disk
+    bytes are our patch — so the .bak next to it is this game version's original — and
+    that .bak exists. A DLL the game has since replaced (sha no longer matches) is left
+    alone: its .bak is stale and copying it back would downgrade the install; the
+    patcher patches the fresh original in place and refreshes the .bak, as before. So
+    is a pre-manifest install, where nothing proves the on-disk bytes are ours."""
+    manifest = load_manifest(managed_dir)
+    rebuild = []
+    for dll in DLLS:
+        path = os.path.join(managed_dir, dll)
+        if (dll in manifest and os.path.isfile(path) and os.path.isfile(path + ".bak")
+                and _sha(path) == manifest[dll]):
+            rebuild.append(dll)
+    return rebuild
+
+
+def preview_fixes(dotnet, managed_dir):
+    """Dry-run against what apply_fixes will patch. A dry run on the live, already
+    patched files would only ever report SKIP, so the DLLs due for a rebuild are shown
+    as their .bak originals through a temporary view of Managed — symlinks to every
+    file, nothing copied, nothing written to the install. The rest of Managed stays
+    visible because the patcher's assembly resolvers scan the directory."""
+    rebuild = _rebuildable_dlls(managed_dir)
+    if not rebuild:
+        return run_patcher(dotnet, managed_dir, apply=False)
+    view = tempfile.mkdtemp(prefix="cs2patch-preview-")
+    try:
+        for name in os.listdir(managed_dir):
+            if name.endswith(".bak") and name[:-4] in rebuild:
+                continue                       # the original is exposed under the DLL's name
+            src = os.path.join(managed_dir, name + ".bak" if name in rebuild else name)
+            os.symlink(src, os.path.join(view, name))
+        return run_patcher(dotnet, view, apply=False)
+    finally:
+        shutil.rmtree(view, ignore_errors=True)
+
+
+def apply_fixes(dotnet, managed_dir):
+    """Rebuild every DLL we patched earlier from its pristine .bak, run the patcher
+    with --apply, then record what it wrote. Re-applying from the original — rather than
+    on top of the previous patch — is what picks up a fix whose IL changed between
+    patcher releases while its idempotency marker did not: on the already-patched DLL
+    that fix reports SKIP and its stale form stays. Returns True when the patcher
+    reported no warnings.
+
+    The manifest is recorded unconditionally: gating it on `ok` meant one DLL's WARN
+    discarded the entries for the DLLs that DID patch, dropping their game-update
+    downgrade protection."""
+    manifest = load_manifest(managed_dir)
+    for dll in _rebuildable_dlls(managed_dir):
+        path = os.path.join(managed_dir, dll)
+        shutil.copy2(path + ".bak", path)
+        manifest.pop(dll, None)
+        print(f"  {cyan('REBUILD')} {dll} — original restored from .bak, re-applying every fix")
+    save_manifest(managed_dir, manifest)
+    ok = run_patcher(dotnet, managed_dir, apply=True)
+    record_patched(managed_dir)
+    return ok
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Paradox Launcher render fix (SwiftShader) — Steam launch options
 # ──────────────────────────────────────────────────────────────────────────────
@@ -782,11 +844,14 @@ def main():
     print()
 
     # ── Step 2: choose action ────────────────────────────────────────────────
-    # "Re-Patch" appears when everything is already applied; the patcher is
-    # idempotent, so re-patching is the safe thing to do after a game update.
+    # "Re-Patch" appears when everything is already applied. It is safe after a game
+    # update (the patcher is idempotent) and is the upgrade path after a patcher
+    # release: apply_fixes rebuilds the DLLs it can vouch for from their .bak originals.
     patch_verb = "Re-Patch" if all_patched else "Patch"
+    rebuild_note = " from the .bak originals" if _rebuildable_dlls(managed_dir) else ""
     actions = [
-        ("patch", f"{patch_verb} — apply all fixes (launch, assets, pause menu, snapping, Paradox Mods)"),
+        ("patch", f"{patch_verb} — apply all fixes{rebuild_note} "
+                  "(launch, assets, pause menu, snapping, Paradox Mods)"),
     ]
     if any_patched:                       # Restore only when there's something to undo
         actions.append(("restore", "Restore original files"))
@@ -814,7 +879,12 @@ def main():
     # ── Step 4: preview (dry-run, writes nothing) ────────────────────────────
     print("Step 1 of 2 — Preview. Nothing is written yet.")
     print("─" * 60)
-    preview_ok = run_patcher(dotnet, managed_dir, apply=False)
+    rebuild = _rebuildable_dlls(managed_dir)
+    if rebuild:
+        print(f"  {len(rebuild)} previously patched DLL(s) will be rebuilt from their .bak")
+        print("  originals, so every fix is applied in its current form:")
+        print("    " + ", ".join(rebuild))
+    preview_ok = preview_fixes(dotnet, managed_dir)
     print("─" * 60)
     if not preview_ok:
         print(yellow("  Preview reported warnings — review the output above before applying."))
@@ -827,16 +897,10 @@ def main():
     # ── Step 5: apply ────────────────────────────────────────────────────────
     print("\nStep 2 of 2 — Applying. Originals are backed up to *.bak.")
     print("─" * 60)
-    ok = run_patcher(dotnet, managed_dir, apply=True)
+    ok = apply_fixes(dotnet, managed_dir)     # rebuild from .bak, patch, record manifest
     print("─" * 60 + "\n")
 
     # ── Step 6: verify outcome & summarise ───────────────────────────────────
-    # Always snapshot what actually patched (record_patched only records DLLs whose bytes
-    # differ from their .bak, and drops the rest). Gating this on `ok` meant one DLL's WARN
-    # discarded the manifest entries for the DLLs that DID patch, dropping their game-update
-    # downgrade protection — so record unconditionally after an apply.
-    record_patched(managed_dir)               # snapshot what we patched (see MANIFEST)
-    print()
     ensure_launcher_render_fix(managed_dir)   # Paradox Launcher 2026.8+ window fix
     print()
     ensure_launcher_path_fix(managed_dir)     # CrossOver 26.2+ launcher spawn fix
