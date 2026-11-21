@@ -8,7 +8,12 @@
 
 Corrige fallos y habilita Paradox Mods para **Cities: Skylines 2** ejecutándose bajo CrossOver en macOS.
 
-Probado: **CrossOver 26 · Juego v1.5.8f1–v1.6.0f1 · Apple Silicon (M3 Pro → M5 Max)**
+Probado: **CrossOver 26 · Juego v1.5.8f1–v1.6.4f1 · Apple Silicon (M3 Pro → M5 Max)**
+
+> [!IMPORTANT]
+> **¿Mundo 3D negro en v1.6.4f1?** La interfaz funciona, pero el terreno, las carreteras y los edificios se ven negros.
+> En los ajustes de la botella cambia **Gráficos** de D3DMetal a **DXMT** y deja **MSync**.
+> Más detalles en [#18](https://github.com/alien-agent/cs2-macos-patcher/issues/18).
 
 ---
 
@@ -73,7 +78,7 @@ Mi recomendación personal para los mejores gráficos/rendimiento en CrossOver 2
 
 | Setting                       | Value                | Notes                                                                                                                                                                                               |
 |-------------------------------|----------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Gráficos**                  | **D3DMetal**         | CS2 usa DirectX 12. D3DMetal (del Apple Game Porting Toolkit) es el único traductor que soporta DX12 correctamente. DXVK y wined3d son más lentos o están rotos para DX12. DXMT es solo para DX11: no lo uses. |
+| **Gráficos**                  | **D3DMetal**, o **DXMT** en v1.6.4f1 | CS2 usa DirectX 12. D3DMetal (del Apple Game Porting Toolkit) es el que mejor lo maneja; DXVK y wined3d son más lentos o no funcionan con DX12. En v1.6.4f1 D3DMetal puede mostrar el mundo en negro: en ese caso usa DXMT ([#18](https://github.com/alien-agent/cs2-macos-patcher/issues/18)). |
 | **Sincronización**           | **MSync**            | Sincronización basada en semáforos Mach. Confirmado como mejor que ESync para CS2.                                                                                                                                     |
 | **DLSS (impulsado por MetalFX)** | **Habilitado — pero desactívalo si CS2 se cierra inesperadamente**          | Nuevo en CrossOver 26; requiere que DLSS también esté habilitado dentro del juego; gran ganancia de FPS en Apple Silicon. ⚠️ **Puede provocar cierres inesperados nativos de D3DMetal a los pocos minutos de juego** en algunas configuraciones (resolución alta + ciudades pesadas o con muchos mods de assets): el juego se cierra al escritorio sin ningún diálogo de error y Steam escribe un `assert_cities2.exe_*.dmp`. Si te ocurre, ponlo en **Desactivado** (es el control de MetalFX); una sesión larga y limpia sin nuevos volcados confirma la solución.                                                                                       |
 | **Modo de Alta Resolución**      | **Activado (con la resolución del juego limitada)**               | Desactiva el duplicado de píxeles para que la interfaz se vea nítida en pantallas Retina. ⚠️ También permite que CS2 renderice a la resolución **nativa** de la pantalla: en monitores 5K/6K eso es un render de ~6K que arruina el rendimiento y agrava el cierre por MetalFX de arriba. Mantenlo **Activado solo si** limitas la **Resolución** dentro del juego a 1080p/1440p (consulta la [configuración dentro del juego](#configuración-gráfica-dentro-del-juego) más abajo); de lo contrario, ponlo en **Desactivado** en pantallas de alta resolución.                                                                                                                                     |
